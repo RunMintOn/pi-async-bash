@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { truncateTail } from "@earendil-works/pi-coding-agent";
@@ -27,8 +27,8 @@ interface LiveTask {
   done: Promise<void>;
 }
 type Outcome = { result: Result } | { error: Error };
-const handoffMs = 30_000;
-const taskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const handoffMs = 63_000;
+const taskIdPattern = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 
 export function eventId(task: TaskRecord) {
   return `${task.task_id}:terminal`;
@@ -36,7 +36,7 @@ export function eventId(task: TaskRecord) {
 
 function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
-    const abort = () => { cleanup(); reject(new Error("Waiting aborted; the task continues.")); };
+    const abort = () => { cleanup(); reject(new Error("Task control aborted.")); };
     const cleanup = () => signal?.removeEventListener("abort", abort);
     if (signal?.aborted) return abort();
     signal?.addEventListener("abort", abort, { once: true });
@@ -74,13 +74,24 @@ export class TaskManager {
     run: (signal: AbortSignal, log: (data: Buffer) => void, started: () => void) => Promise<Result>;
   }): Promise<Result> {
     if (this.closing) throw new Error("pi is shutting down.");
-    const id = randomUUID();
+    let id: string;
+    let fd: number;
+    while (true) {
+      id = randomBytes(4).toString("hex");
+      if (this.live.has(id) || existsSync(join(this.directory, `${id}.json`))) continue;
+      try {
+        // Exclusive creation also reserves the ID against other pi processes.
+        fd = openSync(join(this.directory, `${id}.log`), "wx", 0o600);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
     const record: TaskRecord = {
       task_id: id, owner_session_id: options.owner,
       cwd: options.cwd, status: "running", log_path: join(this.directory, `${id}.log`),
       started_at: Date.now(), exit_code: null, total_bytes: 0, total_lines: 0,
     };
-    const fd = openSync(record.log_path, "wx", 0o600);
     const controller = new AbortController();
     let finish!: () => void;
     const task: LiveTask = {
@@ -100,7 +111,7 @@ export class TaskManager {
     const started = () => {
       record.started_at = Date.now();
       // A shorter execution timeout must settle as a foreground timeout.
-      if (options.timeout === undefined || options.timeout > 30) timer = setTimeout(release, handoffMs);
+      if (options.timeout === undefined || options.timeout * 1000 > handoffMs) timer = setTimeout(release, handoffMs);
     };
     const log = (data: Buffer) => {
       if (logError) return;
@@ -160,8 +171,10 @@ export class TaskManager {
       task.handed = true;
       return {
         content: [{ type: "text", text:
-          `Still running after 30 seconds. Task: ${id}\nLog: ${record.log_path}\n` +
-          "You will be notified when it finishes. Do not poll. Use bash_task with action status, wait, or kill.\n" +
+          `Still running after 63 seconds. Task: ${id}\nLog: ${record.log_path}\n` +
+          "You will be notified when it finishes. Do not poll. " +
+          "Continue work that does not depend on this result. If none remains, end your turn and resume when notified.\n" +
+          "bash_task supports status and kill.\n" +
           "The task stops when pi exits; any execution timeout still applies." }],
         details: { ...record },
         structuredContent: { ...record, wall_time_seconds: (Date.now() - record.started_at) / 1000 },
@@ -194,14 +207,12 @@ export class TaskManager {
     return record;
   }
 
-  async control(id: string, action: "status" | "wait" | "kill", signal?: AbortSignal): Promise<Result> {
+  async control(id: string, action: "status" | "kill", signal?: AbortSignal): Promise<Result> {
     let record = this.get(id);
-    if (action !== "status" && record.status === "running") {
+    if (action === "kill" && record.status === "running") {
       const task = this.live.get(id)!;
-      if (action === "kill") {
-        task.stopRequested = true;
-        task.controller.abort();
-      }
+      task.stopRequested = true;
+      task.controller.abort();
       await abortable(task.done, signal);
       record = this.get(id);
     }

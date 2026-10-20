@@ -60,6 +60,16 @@ test("tool_call restrictions still block shell execution and invalid shells fail
   } finally { await invalid.close(); }
 });
 
+test("bash_task rejects the removed wait action before looking up a task", async () => {
+  const h = await harness();
+  try {
+    const result = await h.call("removed wait", { task_id: "00000000", action: "wait" }, "bash_task");
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /action/);
+    assert(!textOf(result).includes("Unknown task"));
+  } finally { await h.close(); }
+});
+
 test("cancellation at the handoff decision stops the command instead of losing an unreported task", async (t) => {
   const h = await harness();
   try {
@@ -70,7 +80,7 @@ test("cancellation at the handoff decision stops the command instead of losing a
     const running = h.runtime.session.prompt("cancel at handoff");
     await ready;
     const pid = Number(readFileSync(pidFile, "utf8"));
-    t.mock.timers.tick(30000);
+    t.mock.timers.tick(63000);
     // Abort before the resolved deadline promise can commit its handoff.
     await h.runtime.session.abort();
     await running;
@@ -82,22 +92,53 @@ test("cancellation at the handoff decision stops the command instead of losing a
   } finally { t.mock.timers.reset(); await h.close(); }
 });
 
-test("long bash hands off once after 30 seconds and bash_task waits for its result", { timeout: 45000 }, async () => {
+test("a 32-second execution timeout stays foreground beyond the old handoff deadline", { timeout: 10000 }, async (t) => {
   const h = await harness();
   try {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const ready = eventOnce(h.runtime.session, (e) =>
+      e.type === "tool_execution_update" && textOf(e.partialResult).includes("TIMEOUT_READY"));
+    let returned = false;
+    const running = h.call("timeout before handoff", {
+      command: "printf TIMEOUT_READY; sleep 100", timeout: 32,
+    }).then((result) => { returned = true; return result; });
+    await ready;
+    t.mock.timers.tick(15000);
+    await new Promise(setImmediate);
+    assert.equal(returned, false, "execution timeout must not opt into the old 15-second handoff");
+    t.mock.timers.tick(17000);
+    const result = await running;
+    assert.equal(result.details?.task_id, undefined);
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /TIMEOUT_READY[\s\S]*timed out after 32 seconds/);
+  } finally { t.mock.timers.reset(); await h.close(); }
+});
+
+test("long bash hands off once after 63 seconds and completes through notification", { timeout: 85000 }, async () => {
+  const h = await harness();
+  try {
+    const started = performance.now();
     const result = await h.call("long", {
-      command: "printf 'early\\n'; sleep 31; printf 'late\\n'; exit 7",
+      command: "printf 'early\\n'; sleep 65; printf 'late\\n'; exit 7",
     });
     const taskId = result.details?.task_id;
     assert.equal(typeof taskId, "string", textOf(result));
-    assert.match(textOf(result), /30 seconds|30s/);
+    assert(performance.now() - started >= 62000, "handed off before the 63-second waiting window");
+    assert.match(taskId, /^[0-9a-f]{8}$/);
+    assert.match(textOf(result), /63 seconds|63s/);
     const status = await h.call("status", { task_id: taskId, action: "status" }, "bash_task");
     assert.equal(status.details.status, "running");
     assert.match(textOf(status), /early/);
-    const waited = await h.call("wait", { task_id: taskId, action: "wait" }, "bash_task");
-    assert.equal(waited.isError, true);
-    assert.equal(waited.details.exit_code, 7);
-    assert.equal(readFileSync(waited.details.log_path, "utf8"), "early\nlate\n");
+    const completed = eventOnce(h.runtime.session, (e) =>
+      e.type === "message_end" && e.message.role === "custom" && e.message.details?.task_id === taskId, 5000);
+    const resumed = eventOnce(h.runtime.session, (e) =>
+      e.type === "agent_settled" && h.runtime.session.messages.some((m) => m.role === "custom" && m.details?.task_id === taskId), 5000);
+    const [notification] = await Promise.all([completed, resumed]);
+    assert.match(textOf(notification.message), /exited.*exit_code=7/);
+    const final = await h.call("final status", { task_id: taskId, action: "status" }, "bash_task");
+    assert.notEqual(final.isError, true);
+    assert.equal(final.details.exit_code, 7);
+    assert.equal(readFileSync(final.details.log_path, "utf8"), "early\nlate\n");
     const killed = await h.call("kill finished", { task_id: taskId, action: "kill" }, "bash_task");
     assert.equal(killed.details.status, "exited");
     assert.equal(killed.details.exit_code, 7);

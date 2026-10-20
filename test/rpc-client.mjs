@@ -46,7 +46,7 @@ export class TestRpc {
     this.exited = once(this.child, "exit");
   }
   async ready() { return this.send("get_state"); }
-  wait(predicate, since = 0, timeout = 45000) {
+  wait(predicate, since = 0, timeout = 90000) {
     const existing = this.events.slice(since).find(predicate);
     if (existing) return Promise.resolve(existing);
     return new Promise((resolve, reject) => {

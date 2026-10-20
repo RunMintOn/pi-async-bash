@@ -17,12 +17,8 @@ export default function asyncBash(pi: ExtensionAPI) {
   pi.registerTool<typeof definition.parameters, unknown>({
     ...definition,
     renderResult: undefined,
-    description: definition.description + " After 30 seconds, returns a running task instead of waiting. Completion is notified automatically.",
+    description: definition.description + " After 63 seconds, returns a running task instead of waiting. Completion is notified automatically.",
     outputSchema: Type.Union([definition.outputSchema!, taskSchema]),
-    promptGuidelines: [
-      ...(definition.promptGuidelines ?? []),
-      "bash automatically returns a task after 30 seconds. Completion is notified; do not sleep or repeatedly poll. Use bash_task(action='wait') only when you explicitly need to wait. Tasks stop when pi exits; timeout still limits total execution.",
-    ],
     execute(id, input, signal, update, ctx) {
       const settings = pi.getSettings();
       const operations = createLocalBashOperations({ shellPath: settings.shellPath });
@@ -52,10 +48,10 @@ export default function asyncBash(pi: ExtensionAPI) {
   pi.registerTool({
     name: "bash_task",
     label: "bash task",
-    description: "Inspect, explicitly wait for, or kill a bash task. Completion is notified automatically; do not poll.",
+    description: "Inspect or kill a bash task. Completion is notified automatically.",
     parameters: Type.Object({
       task_id: Type.String({ description: "Task ID returned by bash" }),
-      action: Type.Union([Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill")]),
+      action: Type.Union([Type.Literal("status"), Type.Literal("kill")]),
     }),
     outputSchema: taskSchema,
     execute: (_id, args, signal) => manager.control(args.task_id, args.action, signal),
@@ -106,7 +102,7 @@ export default function asyncBash(pi: ExtensionAPI) {
         pending.delete(data.task_event_id);
       }
     });
-    // Wait results must reach the transcript before deciding whether another turn is necessary.
+    // Task results must reach the transcript before deciding whether another turn is necessary.
     const offTurn = pi.on("turn_end", () => flush(true));
     const offSettled = pi.on("agent_before_settle", () => flush(true));
     unbind = () => { active = false; unsubscribe(); offMessage(); offTurn(); offSettled(); };

@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { TestRpc } from "./rpc-client.mjs";
 import { textOf } from "./support.mjs";
 
-test("real RPC: automatic handoff, nested structured output, controls, reload, session ownership and quit", { timeout: 65000 }, async (t) => {
+test("real RPC: automatic handoff, nested structured output, controls, reload, session ownership and quit", { timeout: 150000 }, async (t) => {
   const rpc = new TestRpc();
   let reopened;
   t.diagnostic(`RPC artifacts: ${rpc.dir}`);
@@ -17,20 +17,18 @@ test("real RPC: automatic handoff, nested structured output, controls, reload, s
     const hold = (name, exit = 0) => `printf 'early\\n'; while [ ! -f '${gate(name)}' ]; do sleep 0.05; done; printf 'late\\n'; exit ${exit}`;
     const since = rpc.events.length;
     const batch = [
-      { name: "bash", args: { command: hold("notify", 9), timeout: 55 } },
-      { name: "bash", args: { command: hold("wait"), timeout: 55 } },
-      { name: "bash", args: { command: "printf timed; sleep 100", timeout: 31.8 } },
-      { name: "bash", args: { command: `sleep 100 & echo $! > '${gate("child.pid")}'; wait`, timeout: 55 } },
+      { name: "bash", args: { command: hold("notify", 9), timeout: 150 } },
+      { name: "bash", args: { command: "printf timed; sleep 100", timeout: 66 } },
+      { name: "bash", args: { command: `sleep 100 & echo $! > '${gate("child.pid")}'; wait`, timeout: 150 } },
       { name: "codemode", args: { code: `const r = await tools.bash(${JSON.stringify({
-        command: `echo $$ > '${gate("nested.pid")}'; "${process.execPath}" -e 'process.stdout.write("中".repeat(100000))'; ${hold("nested")}`, timeout: 55,
+        command: `echo $$ > '${gate("nested.pid")}'; "${process.execPath}" -e 'process.stdout.write("中".repeat(100000))'; ${hold("nested")}`, timeout: 150,
       })}); return r;` } },
     ];
     const results = await rpc.prompt("CALL " + JSON.stringify(batch));
-    assert.equal(results.length, 5);
-    const [notify, wait, timed, kill, nested] = results;
+    assert.equal(results.length, 4);
+    const [notify, timed, kill, nested] = results;
     const id = notify.details.task_id;
     assert.equal(notify.details.status, "running");
-    assert.equal(wait.details.status, "running");
     assert.equal(timed.details.status, "running");
     assert.equal(kill.details.status, "running");
     assert.match(textOf(nested), /"task_id":/);
@@ -53,23 +51,6 @@ test("real RPC: automatic handoff, nested structured output, controls, reload, s
     assert.equal(stillRunning.details.status, "running");
     assert.match(textOf(stillRunning), /early/);
 
-    // Cancelling a wait is not a kill.
-    const waitingAt = rpc.events.length;
-    await rpc.send("prompt", { message: "CALL " + JSON.stringify([{ name: "bash_task", args: { task_id: wait.details.task_id, action: "wait" } }]) });
-    await rpc.wait((e) => e.type === "tool_execution_start" && e.toolName === "bash_task", waitingAt);
-    await rpc.send("abort");
-    const afterAbort = await rpc.call("bash_task", { task_id: wait.details.task_id, action: "status" });
-    assert.equal(afterAbort.details.status, "running");
-
-    const waitSince = rpc.events.length;
-    const waiting = rpc.call("bash_task", { task_id: wait.details.task_id, action: "wait" });
-    await rpc.wait((e) => e.type === "tool_execution_start" && e.toolName === "bash_task", waitSince);
-    writeFileSync(gate("wait"), "");
-    const finalWait = await waiting;
-    assert.equal(finalWait.details.exit_code, 0);
-    await delay(30);
-    assert(!rpc.events.slice(waitSince).some((e) => e.type === "message_end" && e.message.role === "custom" && e.message.details?.task_id === wait.details.task_id));
-
     const killed = await rpc.call("bash_task", { task_id: kill.details.task_id, action: "kill" });
     assert.equal(killed.details.status, "killed");
     const childPid = Number(readFileSync(gate("child.pid"), "utf8"));
@@ -81,11 +62,14 @@ test("real RPC: automatic handoff, nested structured output, controls, reload, s
       assert(state === "" || state.startsWith("Z"), `child still running: ${state}`);
     }
 
-    const timeoutResult = await rpc.call("bash_task", { task_id: timed.details.task_id, action: "wait" });
+    const timeoutNotice = await rpc.wait((e) => e.type === "message_end" &&
+      e.message.role === "custom" && e.message.details?.task_id === timed.details.task_id);
+    await rpc.wait((e) => e.type === "agent_settled", rpc.events.indexOf(timeoutNotice) + 1);
+    const timeoutResult = await rpc.call("bash_task", { task_id: timed.details.task_id, action: "status" });
     assert.equal(timeoutResult.details.status, "timed_out");
-    assert.equal(timeoutResult.isError, true);
+    assert.notEqual(timeoutResult.isError, true);
     assert.match(textOf(timeoutResult), /timed/);
-    assert(timeoutResult.details.wall_time_seconds < 35, "execution timeout was reset at handoff");
+    assert(timeoutResult.details.wall_time_seconds < 70, "execution timeout was reset at handoff");
 
     await rpc.send("new_session");
     assert.notEqual((await rpc.send("get_state")).sessionId, owner);
@@ -133,7 +117,7 @@ test("real RPC: automatic handoff, nested structured output, controls, reload, s
   } finally { await reopened?.close(); await rpc.close(); }
 });
 
-test("after a real pi crash, a new runtime reports unknown and never adopts the old process", { timeout: 45000 }, async (t) => {
+test("after a real pi crash, a new runtime reports unknown and never adopts the old process", { timeout: 95000 }, async (t) => {
   const original = new TestRpc();
   let restored;
   let shellPid;
@@ -143,7 +127,7 @@ test("after a real pi crash, a new runtime reports unknown and never adopts the 
     const pidFile = join(original.dir, "crash-shell.pid");
     const running = await original.call("bash", {
       command: `echo $$ > '${pidFile}'; printf crash-start; sleep 100`,
-      timeout: 40,
+      timeout: 90,
     });
     const id = running.details.task_id;
     assert.equal(running.details.status, "running");

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, eventOnce, textOf } from "./support.mjs";
 
-test("a handed-off task notifies its owner and continues the agent", { timeout: 42000 }, async () => {
+test("a handed-off task notifies its owner and continues the agent", { timeout: 85000 }, async () => {
   const h = await harness();
   try {
-    const result = await h.call("long notification", { command: "printf first; sleep 31; printf finished; exit 9" });
+    const result = await h.call("long notification", { command: "printf first; sleep 65; printf finished; exit 9" });
     const id = result.details?.task_id;
     assert.equal(typeof id, "string");
     const notified = eventOnce(h.runtime.session, (e) =>

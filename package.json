@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Automatically release long-running pi bash calls after 30 seconds.",
+  "description": "Automatically release long-running pi bash calls after 63 seconds.",
   "pi": {
     "extensions": ["./index.ts"]
   },
