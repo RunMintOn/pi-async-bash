@@ -1,6 +1,6 @@
 {
   "name": "@runminton/pi-async-bash",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Automatically hand long-running pi bash commands to a managed background task and resume the session when it finishes.",
   "type": "module",
   "license": "MIT",
@@ -21,7 +21,9 @@
     "background-task"
   ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "files": [
     "index.ts",
