@@ -110,3 +110,13 @@
 - 未穷举所有调度顺序；没有单独构造多任务恢复上下文耗尽预算的测试。
 - 不承诺组合其他同名 bash 覆盖、私有执行后端或终止主动脱离进程组的后代。
 - 按用户要求本地串行实施，无远端 issue/PR、无 subagent、无额外 worktree、无 commit。
+
+## 发布
+
+- 状态：已公开。GitHub `RunMintOn/pi-async-bash`（public，默认分支 `main`），npm `@runminton/pi-async-bash@0.1.0`，MIT。
+- 包名：`pi-async-bash` 已被其他维护者占用，改用作用域 `@runminton/pi-async-bash`；GitHub 仓库名保持 `pi-async-bash`。
+- 发布准备：删除 `private`；新增 `files`、`license`、`repository`、`keywords`；宿主提供的 `@earendil-works/pi-coding-agent` 与 `typebox` 按 Pi 包文档改为 `peerDependencies: "*"`；README 改为唯一英文版并新增 MIT `LICENSE`。
+- 打包内容只有 `index.ts`、`src/status.ts`、`src/tasks.ts`、`README.md`、`LICENSE`、`package.json`，不含测试、分析材料与 `.scratch`。
+- 首次发布后 registry 先出现 `0.0.0-stage` 占位版本，约数分钟后 `0.1.0` 生效；占位版本已标记 deprecated，指向 0.1.0。
+- 直接下载 registry 上的 0.1.0 tarball 解包后，用真实 `DefaultResourceLoader` 加载，工具为 `bash`、`bash_task`，无扩展错误。
+- 未在用户日常完整扩展环境启动交互式 TUI；未调用外部模型。GitHub 与 npm 均为用户明确授权的公开操作。
