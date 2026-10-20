@@ -23,6 +23,8 @@ pi -e /absolute/path/to/pi-async-bash/index.ts
 
 不要同时加载另一个覆盖 `bash` 的扩展。pi 1.3.0 对重复工具只报告冲突，按加载顺序选中定义，不会把两个执行后端自动组合起来。本扩展支持标准 `shellPath`、`shellCommandPrefix` 和 `tool_call` 限制，不承诺组合其他扩展私有的 spawn hook、SSH 或 sandbox 执行后端。
 
+配合已取消 bash 执行覆盖的 `pi-compact-tool` 使用时，async-bash 负责执行，compact 只美化展示；两种加载顺序均可。旧版 compact 仍注册 bash，需要同时更新。
+
 ## 使用
 
 普通 bash 参数不变：
@@ -57,6 +59,20 @@ bash_task({ task_id: "...", action: "kill" })
 `timeout` 是整个命令的执行上限，后台交接不会重新计时。63 秒是等待阈值，不是执行超时。
 
 `bash_task` 不再支持 `wait`，`bash` 不增加同步等待参数。收到运行中结果后，继续处理不依赖该结果的工作；没有其他工作时，结束当前轮次，由完成通知继续任务。
+
+## Footer
+
+TUI 中通过 Pi 原生状态接口显示当前会话的后台任务，不替换 Footer，也不依赖 compact：
+
+```text
+BG 2 · 3m 12s / 1m 05s
+```
+
+时间从各命令实际启动时计算，包含前台的 63 秒。按启动先后排列，每秒刷新，不显示 ID。任务结束时移除对应时间，无后台任务时隐藏；不把前台命令或旧运行时的 unknown 任务计入数量。
+
+窄窗口先压缩时间中的空格，再以 `+N` 表示省略的时间项，例如 `BG 2 · 3m12s / +1`。状态仍受 Pi 原生 Footer 的整行截断约束。
+
+切会话只显示当前会话拥有或继承引用的任务。compact 的工具行显示 `Backgrounded`，记录当时发生了交接；当前是否仍在运行看 Footer，最终结果看完成通知。
 
 ## 生命周期
 

@@ -21,6 +21,21 @@
 
 ## 验证记录
 
+### T6 — compact 兼容与后台 Footer
+
+- 范围：两个本地 ticket 位于 `.scratch/bash-compat-footer/issues/`；串行实施，不创建远端 issue。
+- compact 停止注册 bash，保留现有 TUI 展示链路和 edit/write 执行包装。三种紧凑风格用 `Backgrounded` 记录交接；模型结果不变，off 保留原始内容。
+- async-bash 使用原生 `setStatus` 显示 `BG N · 时长 / 时长`，按实际启动顺序每秒更新；终态即移除，无任务时停止计时。仅匹配当前 owner 或活动分支继承引用，排除前台及 unknown。
+- 计时基于生命周期边界取得的快照，完成订阅负责移除任务。每秒不读磁盘或日志；没有改动管理器或执行规则，已有进程级管理器可继续使用。
+- 回归测试先在重复注册处失败，再在工具行仅显示 `4 lines` 处失败；修复后两个顺序均通过短命令、加速 63 秒交接、三种风格、off 与完成通知接续。日志：`/tmp/pi-async-compat-red.log`、`/tmp/pi-async-compat-display-red.log`、`/tmp/pi-async-compat-green.log`。
+- Footer 的三个真实会话场景已通过：并发数量/计时/结束/窄宽度、切会话/fork/reload/清理、codemode 内 bash。原生 FooterComponent 的 80/20 列输出保留在 `/tmp/pi-async-footer-nested.log`。这些新增场景使用可控时间、真实子进程，不调用外部模型 API。
+- compact 自有测试新增外部 bash 执行与后台展示场景。完整 `npm test`：async-bash 15/15 通过，约 266 秒，包含真实 63 秒和真实 CLI/RPC；compact 当前工作树 `npm run check`：82/82 通过。两仓类型检查及 `git diff --check` 通过。
+- 完整日志：`/tmp/pi-async-compat-footer-full.log`、`/tmp/pi-async-compat-footer-types.log`、`/tmp/pi-compact-compat-footer-full.log`。RPC 记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-5xGKjO`；崩溃恢复：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-fgM1n5`。
+- compact 的提交 `ef33f0c` 按原 HEAD 仅加入本次四个文件的修复，不混入已有修改。独立导出的提交快照通过类型检查和 77/77 测试：`/tmp/pi-compact-isolated-full.log`。
+- 串行 Standards review：检查 async 相对 `375dc41` 的差异，以及 compact 相对修改前快照的增量；保留用户已有展示改动，恢复一处不必要的列表编辑，无未解决问题。串行 Spec review：对照两个 ticket，加载顺序、执行归属、后台展示、原生 Footer、会话归属和生命周期均有对应实现与验证，无未解决问题。
+- 验证包含真实组件渲染，但没有在用户日常全部扩展环境中启动交互式终端，也没有调用真实模型；没有修改全局配置或 Pi 安装文件，没有 push。
+- review 后重跑受影响场景：async 5/5、compact 7/7 通过，日志为 `/tmp/pi-async-final-targeted.log`、`/tmp/pi-compact-final-targeted.log`。
+
 ### T5 — 明确完成通知的接续动作
 
 - 状态：已完成。自动完成通知在原任务结果前增加：`Background bash task finished. Use the result below to continue any dependent work.`

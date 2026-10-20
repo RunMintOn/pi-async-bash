@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { createBashToolDefinition, createLocalBashOperations, getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { eventId, getManager, type TaskRecord } from "./src/tasks.ts";
+import { installTaskStatus, taskReferences } from "./src/status.ts";
 
 function details(value: unknown): { task_id?: string; task_event_id?: string } {
   return value && typeof value === "object" ? value : {};
@@ -59,6 +60,7 @@ export default function asyncBash(pi: ExtensionAPI) {
   let unbind = () => {};
   pi.on("session_start", (_event, ctx) => {
     unbind();
+    const disposeStatus = installTaskStatus(pi, ctx, manager);
     const owner = ctx.sessionManager.getSessionId();
     let active = true;
     const queued = new Set<string>();
@@ -108,19 +110,10 @@ export default function asyncBash(pi: ExtensionAPI) {
     // Task results must reach the transcript before deciding whether another turn is necessary.
     const offTurn = pi.on("turn_end", () => flush(true));
     const offSettled = pi.on("agent_before_settle", () => flush(true));
-    unbind = () => { active = false; unsubscribe(); offMessage(); offTurn(); offSettled(); };
+    unbind = () => { active = false; disposeStatus(); unsubscribe(); offMessage(); offTurn(); offSettled(); };
   });
   pi.on("context", (event, ctx) => {
-    const references = new Set<string>();
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === "async-bash-task") {
-        const id = details(entry.data).task_id;
-        if (id) references.add(id);
-      }
-      if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
-      const id = details(entry.message.details).task_id;
-      if (id) references.add(id);
-    }
+    const references = taskReferences(ctx.sessionManager.getBranch());
     const visible = new Set(event.messages.flatMap((m) => {
       const id = m.role === "custom" || m.role === "toolResult" ? details(m.details).task_event_id : undefined;
       return id ? [id] : [];

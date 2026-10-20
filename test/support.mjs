@@ -19,7 +19,7 @@ export function eventOnce(session, predicate, timeout = 45000) {
   });
 }
 
-export async function harness(settings = {}, extensionFactories = []) {
+export async function harness(settings = {}, extensionFactories = [], options = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-async-test-"));
   process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
   const commands = new Map();
@@ -65,7 +65,7 @@ export async function harness(settings = {}, extensionFactories = []) {
     const resourceLoader = new pi.DefaultResourceLoader({
       cwd: dir, agentDir: join(dir, "agent"), settingsManager,
       noExtensions: true, noSkills: true, noContextFiles: true, noThemes: true, noPromptTemplates: true,
-      additionalExtensionPaths: [extensionPath],
+      additionalExtensionPaths: options.extensionPaths ?? [extensionPath],
       extensionFactories,
     });
     await resourceLoader.reload();
@@ -74,15 +74,15 @@ export async function harness(settings = {}, extensionFactories = []) {
     const services = { cwd: dir, agentDir: join(dir, "agent"), settingsManager, resourceLoader, modelRuntime, diagnostics: [] };
     const result = await pi.createAgentSessionFromServices({
       services, sessionManager, sessionStartEvent, model, thinkingLevel: "off",
-      tools: ["bash", "bash_task"],
+      tools: options.tools ?? ["bash", "bash_task"],
     });
     return { ...result, services, diagnostics: [] };
   }
   const runtime = await pi.createAgentSessionRuntime(factory, {
     cwd: dir, agentDir: join(dir, "agent"), sessionManager: pi.SessionManager.create(dir, join(dir, "sessions")),
   });
-  runtime.setRebindSession((s) => s.bindExtensions({}));
-  await runtime.session.bindExtensions({});
+  runtime.setRebindSession((s) => s.bindExtensions(options.binding ?? {}));
+  await runtime.session.bindExtensions(options.binding ?? {});
   return {
     dir, runtime, commands, requests,
     async call(text, args, name = "bash") {
