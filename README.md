@@ -1,39 +1,41 @@
-# pi-async-bash
+# Async Bash
 
-让长时间运行的 bash 命令不再一直占住当前工具调用。
+Long bash commands no longer hold a tool call hostage.
 
-- 63 秒内结束：返回原来的 bash 结果。
-- 超过 63 秒：返回 task ID，命令继续运行，结束后通知原会话。
-- 新增 `bash_task`，提供 `status`、`kill`。
-- 不增加 `background` 参数，不要求 Agent 预测命令耗时。
+- Finishes within 63 seconds: returns the normal bash result.
+- Still running after 63 seconds: returns a task ID, the command keeps running, and the original session is notified when it ends.
+- Adds `bash_task` with `status` and `kill`.
+- No `background` parameter. The model never has to guess how long a command will take.
 
-## 加载
-
-在想工作的目录启动 pi，并指定此扩展的绝对路径：
+## Install
 
 ```bash
-pi -e /absolute/path/to/pi-async-bash/index.ts
+pi install npm:@runminton/pi-async-bash
 ```
 
-没有自动修改你的 pi 配置。运行扩展使用 pi 提供的 TypeScript 加载器和依赖；开发、类型检查及测试才需要在此目录执行 `npm ci`。
+Or load it for one invocation without changing your settings:
 
-已经加载旧版本时，请在任务结束后重新启动 pi，使新阈值生效；reload 会保留进程级任务管理器。
+```bash
+pi -e npm:@runminton/pi-async-bash
+```
 
-已验证 pi 1.3.0、Node 22.23.2、macOS。实现复用 pi 的本地 shell 后端；没有验证 Windows。
+Installing modifies your pi configuration explicitly through `pi install`. Loading with `-e` does not.
 
-不要同时加载另一个覆盖 `bash` 的扩展。pi 1.3.0 对重复工具只报告冲突，按加载顺序选中定义，不会把两个执行后端自动组合起来。本扩展支持标准 `shellPath`、`shellCommandPrefix` 和 `tool_call` 限制，不承诺组合其他扩展私有的 spawn hook、SSH 或 sandbox 执行后端。
+Verified on pi 1.3.0, Node 22.23.2 and macOS. Implementation reuses pi's local shell backend; Windows is untested.
 
-配合已取消 bash 执行覆盖的 `pi-compact-tool` 使用时，async-bash 负责执行，compact 只美化展示；两种加载顺序均可。旧版 compact 仍注册 bash，需要同时更新。
+Do not load another extension that overrides `bash` at the same time. pi 1.3.0 reports duplicate tools as a conflict and selects a definition by load order; it does not compose two execution backends. This extension honours the standard `shellPath`, `shellCommandPrefix` and `tool_call` restrictions. It does not compose another extension's private spawn hook, SSH or sandbox execution backend.
 
-## 使用
+With a version of `pi-compact-tool` that no longer overrides bash execution, async-bash executes and compact renders; both load orders work. Older compact versions still register bash and must be updated together.
 
-普通 bash 参数不变：
+## Usage
+
+Normal bash parameters are unchanged:
 
 ```typescript
 bash({ command: "npm run e2e", timeout: 600 })
 ```
 
-63 秒未结束时，返回：
+If the command is still running after 63 seconds, the call returns:
 
 ```text
 Still running after 63 seconds. Task: <task_id>
@@ -42,68 +44,68 @@ You will be notified when it finishes. Do not poll.
 Continue work that does not depend on this result. If none remains, end your turn and resume when notified.
 ```
 
-之后按需操作：
+Then, on demand:
 
 ```typescript
 bash_task({ task_id: "...", action: "status" })
 bash_task({ task_id: "...", action: "kill" })
 ```
 
-新任务 ID 为 8 位随机十六进制字符，例如 `a3f8c921`，重名时重新生成。已有 UUID 任务仍可查询和控制。
+New task IDs are 8 random hexadecimal characters, for example `a3f8c921`, regenerated on collision. Existing UUID tasks remain readable and controllable.
 
-| 操作 | 行为 |
+| Action | Behaviour |
 |---|---|
-| status | 返回状态、日志位置和有界的日志尾部 |
-| kill | 停止受管理的进程组，确认结果后返回；已结束任务保持原结果 |
+| status | Returns the status, log location and a bounded log tail |
+| kill | Stops the managed process group and returns after observing the result; a finished task keeps its original result |
 
-`timeout` 是整个命令的执行上限，后台交接不会重新计时。63 秒是等待阈值，不是执行超时。
+`timeout` is the execution limit for the whole command. A background handoff does not restart it. The 63 seconds are a waiting threshold, not an execution timeout.
 
-`bash_task` 不再支持 `wait`，`bash` 不增加同步等待参数。收到运行中结果后，继续处理不依赖该结果的工作；没有其他工作时，结束当前轮次，由完成通知继续任务。
+`bash_task` no longer supports `wait`, and `bash` gains no synchronous waiting parameter. After a running result, continue work that does not depend on it; when nothing is left, end the turn and resume when notified.
 
 ## Footer
 
-TUI 中通过 Pi 原生状态接口显示当前会话的后台任务，不替换 Footer，也不依赖 compact：
+In the TUI, current-session background tasks appear through pi's native status API. The footer itself is not replaced and compact is not required:
 
 ```text
 BG 2 · 3m 12s / 1m 05s
 ```
 
-时间从各命令实际启动时计算，包含前台的 63 秒。按启动先后排列，每秒刷新，不显示 ID。任务结束时移除对应时间，无后台任务时隐藏；不把前台命令或旧运行时的 unknown 任务计入数量。
+Each duration counts from when its command actually started, including the foreground 63 seconds. Entries are ordered by start time and refresh every second; IDs are not shown. A finished task is removed immediately, and the status disappears when nothing is running. Foreground commands and `unknown` tasks from an earlier runtime are never counted.
 
-窄窗口先压缩时间中的空格，再以 `+N` 表示省略的时间项，例如 `BG 2 · 3m12s / +1`。状态仍受 Pi 原生 Footer 的整行截断约束。
+Narrow terminals drop spaces inside durations first, then report omitted entries as `+N`, for example `BG 2 · 3m12s / +1`. The native footer still applies its single-line truncation to all extension statuses.
 
-切会话只显示当前会话拥有或继承引用的任务。compact 的工具行显示 `Backgrounded`，记录当时发生了交接；当前是否仍在运行看 Footer，最终结果看完成通知。
+Switching sessions only shows tasks the current session owns or inherits by reference. The compact tool row shows `Backgrounded` to record that a handoff happened at that point; the footer shows what is running now, and the completion notification carries the final result.
 
-## 生命周期
+## Lifecycle
 
-- 返回 task ID 前，Escape 取消当前命令。
-- 返回 task ID 后，Escape 不会停止该任务；需要停止时使用 kill。
-- `/tree`、切会话、fork/clone 和 reload 不停止任务。
-- 完成通知只自动唤醒原 owner 会话。回到其他分支时补充状态，不重放自动通知。
-- fork/clone 继承的是同一个 task ID，不复制进程；继承会话可以显式查询和停止它。
-- 正常退出 pi 会停止当前进程管理的任务。
-- 崩溃后不承诺任务存活或完整清理；新运行时把无法确认的旧执行标为 unknown，不猜退出码、不凭 PID 接管或停止。
-- 持续运行的服务通常不会自然退出。task 为 running 不代表服务已经就绪。
+- Before a task ID is returned, Escape cancels the running command.
+- After a task ID is returned, Escape does not stop that task; use kill.
+- `/tree`, session switching, fork/clone and reload do not stop tasks.
+- Completion notifications wake only the owning session. Returning to another branch adds state but does not replay the automatic notification.
+- fork/clone inherits the same task ID without copying the process; an inheriting session can query and stop it explicitly.
+- A normal pi exit stops tasks managed by the current process.
+- After a crash, task survival and cleanup are not promised. A new runtime marks executions it cannot confirm as `unknown`; it does not guess an exit code or adopt or stop anything based on a stale PID.
+- Long-running services usually never exit on their own. A `running` task does not mean a service is ready to accept requests.
 
-自动交接只释放这一次 bash 调用。同一批次还有其他阻塞工具时，当前 turn 仍可能需要等待。
+Automatic handoff releases only that one bash call. When the same batch contains other blocking tools, the current turn may still have to wait.
 
-## 输出与状态
+## Output and state
 
-完整 stdout/stderr 保存为日志。任务元数据保存在 pi 的 agent 数据目录下的 `extension-data/async-bash/`；不会写入项目目录。普通短命令也会产生原始输出日志，但不会暴露 task ID 或建立后台完成通知。
+Complete stdout/stderr is saved to a log. Task metadata lives under pi's agent data directory in `extension-data/async-bash/` and is never written into the project. Ordinary short commands also produce a raw output log, but expose no task ID and create no background completion notification.
 
-完成通知和 status 的日志尾部最多 100 行、16KiB。恢复上下文有单独的 16KiB 总预算，不反复注入完整日志。
+Completion notifications and `status` include at most 100 log lines and 16 KiB. Restored context has a separate 16 KiB total budget and does not repeatedly inject full logs.
 
-状态包括 running、exited、killed、timed_out、failed、unknown。非零退出属于 exited，退出码另行保留。status 查询失败任务本身不报工具错误；kill 返回失败终态时会标记错误。
+Statuses are `running`, `exited`, `killed`, `timed_out`, `failed` and `unknown`. A non-zero exit is still `exited`, with the exit code kept separately. Querying a failed task with `status` is not itself a tool error; `kill` on a failing terminal state is marked as an error.
 
-codemode 中：
+Inside codemode:
 
-- 短 bash 返回原有 `output`、`exit_code` 等结构化字段。
-- 长 bash 返回 `task_id`、`status: "running"`、`log_path` 等字段，退出码为 null。
-- `bash_task` 返回任务状态和有界 `output`，脚本应检查状态与退出码。
+- Short bash calls return the original structured fields such as `output` and `exit_code`.
+- Long bash calls return `task_id`, `status: "running"`, `log_path` and similar fields, with a null exit code.
+- `bash_task` returns task status and a bounded `output`; scripts should check status and exit code.
 
-没有历史日志自动清理、PTY、自动重试、任务列表或跨 pi 进程任务接管。终止保证限于受管理的普通进程组，不包括主动脱离该进程组的 daemon 后代。
+There is no automatic log cleanup, PTY, automatic retry, task list or cross-process task adoption. Termination is guaranteed only for the managed process group, excluding daemon descendants that deliberately leave it.
 
-## 开发与验证
+## Development
 
 ```bash
 npm ci
@@ -111,8 +113,12 @@ npm run check
 npm test
 ```
 
-测试使用本地确定性 provider、真实 AgentSession、真实 CLI/RPC 和真实子进程。不调用外部模型 API。测试包含多次真实 63 秒交接，通常约四到五分钟。
+Tests use a local deterministic provider, real AgentSessions, real CLI/RPC and real child processes. No external model API is called. The suite performs several real 63-second handoffs and usually takes four to five minutes.
 
-RPC 测试输出临时结果目录，保留各进程的 `events-<pid>.jsonl`、`stderr-<pid>.log`、会话和命令日志。
+RPC tests print a temporary artifact directory that keeps each process's `events-<pid>.jsonl`, `stderr-<pid>.log`, session and command logs.
 
-本地工作记录见 `TICKETS.md`，验收约定见 `SPEC.md`，研究证据见 `INVESTIGATION.md`。
+Local implementation notes are in `TICKETS.md`, the acceptance contract in `SPEC.md`, and research evidence in `INVESTIGATION.md`.
+
+## License
+
+MIT
