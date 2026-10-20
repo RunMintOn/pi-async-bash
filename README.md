@@ -2,10 +2,69 @@
 
 Long bash commands no longer hold a tool call hostage.
 
-- Finishes within 63 seconds: returns the normal bash result.
-- Still running after 63 seconds: returns a task ID, the command keeps running, and the original session is notified when it ends.
-- Adds `bash_task` with `status` and `kill`.
-- No `background` parameter. The model never has to guess how long a command will take.
+## What installing it changes
+
+One changed behaviour and one new tool:
+
+1. A `bash` call still running after 63 seconds returns a task ID instead of blocking. The command keeps running and the session is notified when it ends.
+2. `bash_task` is added, so the session can check or stop those tasks.
+
+```mermaid
+flowchart TB
+  subgraph before["Before: the tool call owns the wait"]
+    b1["bash({ command, timeout })"] --> b2["pi runs the command"]
+    b2 --> b3["the tool call waits for the exit code"]
+    b3 --> b4["one result: output, exit code, wall time"]
+  end
+  subgraph after["After: the wait can be released once"]
+    a1["bash({ command, timeout })"] --> a2["pi runs the same command"]
+    a2 --> a3{"still running after 63 s?"}
+    a3 -->|"no"| a4["same result as before"]
+    a3 -->|"yes"| a5["result: status running, task_id, log path"]
+    a5 --> a6["the turn continues"]
+    a2 -.->|"same process, never restarted"| a7["command exits"]
+    a7 --> a8["completion message wakes the session that started it"]
+  end
+```
+
+### The bash interface is unchanged
+
+| | |
+|---|---|
+| Tool name | `bash` |
+| Parameters | `command` and `timeout`, same schema and validation. There is no `background` parameter, so the model never guesses how long a command will take |
+| Shell | Same `shellPath`, `shellCommandPrefix`, session environment (`PI_SESSION_ID` and friends) and `tool_call` policies |
+| Foreground | Same native execution code, wrapped only to copy output into a log. Same output text, same truncation to 2000 lines / 50 KB, same exit code and error marking |
+| Timeout | Still an execution limit. A `timeout` of 63 seconds or less never hands off |
+
+Three things about the tool definition do differ:
+
+- The description ends with one sentence that tells the model about the handoff.
+- The declared output schema accepts a normal result or a `running` result.
+- In the TUI, the bash tool no longer supplies a result renderer, so pi's generic renderer draws the result body instead of the built-in bash result widget.
+
+### What gets added
+
+| Addition | Effect |
+|---|---|
+| `bash_task` tool | `status` and `kill` for tasks owned by, or inherited by, the current session |
+| Footer status | TUI only, for example `BG 1 · 2m 10s`, refreshed every second |
+| Completion message | When a handed-off command ends, one message reaches the session that started it and may start a turn |
+| Context note | While tasks exist, a hidden `async-bash-state` message joins model requests, capped at 16 KiB |
+| Session entry | Each handoff appends an `async-bash-task` entry to the branch |
+| Files | `<agent dir>/extension-data/async-bash/` (0700) gets one `.log` per bash call, short calls included, and one `.json` per handed-off task. Nothing is deleted automatically |
+
+Two behaviours change only after a handoff:
+
+- Escape stops the turn, not the background command. Use `bash_task` with `kill`.
+- Quitting pi stops tasks owned by that process.
+
+### What it does not do
+
+- It writes no settings. `pi install` registers the package; the extension reads `shellPath` and `shellCommandPrefix` and changes neither.
+- It touches no project files, starts no daemon and opens no network connection.
+- It makes no model calls of its own. A completion message starts an ordinary turn, using your configured model like any other turn.
+- It does not adopt tasks across processes, and it does not compose another extension's private spawn hook, SSH or sandbox backend.
 
 ## Install
 
@@ -23,7 +82,7 @@ Installing modifies your pi configuration explicitly through `pi install`. Loadi
 
 Verified on pi 1.3.0, Node 22.23.2 and macOS. Implementation reuses pi's local shell backend; Windows is untested.
 
-Do not load another extension that overrides `bash` at the same time. pi 1.3.0 reports duplicate tools as a conflict and selects a definition by load order; it does not compose two execution backends. This extension honours the standard `shellPath`, `shellCommandPrefix` and `tool_call` restrictions. It does not compose another extension's private spawn hook, SSH or sandbox execution backend.
+Do not load another extension that overrides `bash` at the same time. pi 1.3.0 reports duplicate tools as a conflict and selects a definition by load order; it does not compose two execution backends. This extension honours the standard `shellPath`, `shellCommandPrefix` and `tool_call` restrictions.
 
 With a version of `pi-compact-tool` that no longer overrides bash execution, async-bash executes and compact renders; both load orders work. Older compact versions still register bash and must be updated together.
 
@@ -90,8 +149,6 @@ Switching sessions only shows tasks the current session owns or inherits by refe
 Automatic handoff releases only that one bash call. When the same batch contains other blocking tools, the current turn may still have to wait.
 
 ## Output and state
-
-Complete stdout/stderr is saved to a log. Task metadata lives under pi's agent data directory in `extension-data/async-bash/` and is never written into the project. Ordinary short commands also produce a raw output log, but expose no task ID and create no background completion notification.
 
 Completion notifications and `status` include at most 100 log lines and 16 KiB. Restored context has a separate 16 KiB total budget and does not repeatedly inject full logs.
 
