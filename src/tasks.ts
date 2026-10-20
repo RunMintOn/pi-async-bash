@@ -174,7 +174,6 @@ export class TaskManager {
           `Still running after 63 seconds. Task: ${id}\nLog: ${record.log_path}\n` +
           "You will be notified when it finishes. Do not poll. " +
           "Continue work that does not depend on this result. If none remains, end your turn and resume when notified.\n" +
-          "bash_task supports status and kill.\n" +
           "The task stops when pi exits; any execution timeout still applies." }],
         details: { ...record },
         structuredContent: { ...record, wall_time_seconds: (Date.now() - record.started_at) / 1000 },

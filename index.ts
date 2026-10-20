@@ -77,7 +77,10 @@ export default function asyncBash(pi: ExtensionAPI) {
           const result = manager.describe(record);
           queued.add(id);
           pi.sendMessage({
-            customType: "async-bash-completion", content: result.content,
+            customType: "async-bash-completion", content: [
+              { type: "text", text: "Background bash task finished. Use the result below to continue any dependent work." },
+              ...result.content,
+            ],
             display: true, details: result.details,
           }, { triggerTurn: true, deliverAs: "followUp" });
           pending.delete(id);

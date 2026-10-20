@@ -21,6 +21,13 @@
 
 ## 验证记录
 
+### T5 — 明确完成通知的接续动作
+
+- 状态：已完成。自动完成通知在原任务结果前增加：`Background bash task finished. Use the result below to continue any dependent work.`
+- 交接返回删除重复介绍 status、kill 的一行；README 示例同步。普通 status、kill 结果保持不变，工具接口及 63 秒阈值不变。
+- 真实 AgentSession 通知与自动接续测试通过，约 66 秒：`/tmp/pi-async-notice-tests.log`。类型检查通过：`/tmp/pi-async-notice-types.log`；`git diff --check` 通过。
+- 本次只重跑受影响的通知场景，未重跑完整测试套件；未调用外部模型 API。检查差异后未发现额外行为改动。
+
 ### T4 — 移除 wait 与后台接续指引
 
 - 状态：已完成；阻塞：无。用户已确认直接推进并在完成后提交 commit。

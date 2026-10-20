@@ -38,7 +38,6 @@ Still running after 63 seconds. Task: <task_id>
 Log: <absolute_log_path>
 You will be notified when it finishes. Do not poll.
 Continue work that does not depend on this result. If none remains, end your turn and resume when notified.
-bash_task supports status and kill.
 ```
 
 之后按需操作：
