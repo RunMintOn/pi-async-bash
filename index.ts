@@ -18,7 +18,7 @@ export default function asyncBash(pi: ExtensionAPI) {
   pi.registerTool<typeof definition.parameters, unknown>({
     ...definition,
     renderResult: undefined,
-    description: definition.description + " After 63 seconds, returns a running task instead of waiting. Completion is notified automatically.",
+    description: definition.description + " After 63 seconds, returns a running task instead of waiting. Completion is notified automatically. For tasks whose results you need, run the actual command directly and let this tool handle the background handoff. Do not detach it with a trailing & or create sleep-and-poll loops to wait for completion.",
     outputSchema: Type.Union([definition.outputSchema!, taskSchema]),
     execute(id, input, signal, update, ctx) {
       const settings = pi.getSettings();
@@ -78,13 +78,14 @@ export default function asyncBash(pi: ExtensionAPI) {
         try {
           const result = manager.describe(record);
           queued.add(id);
+          // Follow-ups wait for the agent to stop; results must also reach active tool loops.
           pi.sendMessage({
             customType: "async-bash-completion", content: [
               { type: "text", text: "Background bash task finished. Use the result below to continue any dependent work." },
               ...result.content,
             ],
             display: true, details: result.details,
-          }, { triggerTurn: true, deliverAs: "followUp" });
+          }, { triggerTurn: true, deliverAs: "steer" });
           pending.delete(id);
         } catch {
           queued.delete(id);

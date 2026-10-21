@@ -94,6 +94,8 @@ Normal bash parameters are unchanged:
 bash({ command: "npm run e2e", timeout: 600 })
 ```
 
+For work whose result you need, run the command in the foreground. Do not wrap it in `nohup ... &` and then wait with `sleep; tail`: the shell returns after launching the process, so this tool cannot track its completion. The tool already handles long commands and keeps their logs.
+
 If the command is still running after 63 seconds, the call returns:
 
 ```text
@@ -120,6 +122,8 @@ New task IDs are 8 random hexadecimal characters, for example `a3f8c921`, regene
 `timeout` is the execution limit for the whole command. A background handoff does not restart it. The 63 seconds are a waiting threshold, not an execution timeout.
 
 `bash_task` no longer supports `wait`, and `bash` gains no synchronous waiting parameter. After a running result, continue work that does not depend on it; when nothing is left, end the turn and resume when notified.
+
+Completion messages are delivered at the next available turn boundary, even while the agent continues calling tools. They do not interrupt a running tool batch. They use steering delivery rather than a follow-up queue, which would wait for the agent's entire tool loop to stop.
 
 ## Footer
 

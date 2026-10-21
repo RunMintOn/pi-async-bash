@@ -41,7 +41,7 @@ export async function harness(settings = {}, extensionFactories = [], options = 
       requests.push({ at: Date.now(), texts });
       const last = context.messages.at(-1);
       const request = last.role === "user" ? commands.get(textOf(last)) : undefined;
-      const calls = request ? (Array.isArray(request) ? request : [request]) : [];
+      const calls = options.calls?.(context) ?? (request ? (Array.isArray(request) ? request : [request]) : []);
       const msg = {
         role: "assistant", api: model.api, provider: model.provider, model: model.id,
         content: calls.length ? calls.map((c) => ({

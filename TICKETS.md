@@ -21,6 +21,23 @@
 
 ## 验证记录
 
+### T7 — 活跃工具循环中的完成通知与等待行为
+
+- 状态：已完成。通知修复、快速验证、完整回归与真实模型行为抽查均通过。
+- 原始会话证实旧任务完成通知长时间延迟进入对话。隔离复现证实 `followUp` 要等 Agent 停止工具循环；改用 `steer` 后，完成结果在当前工具批次结束后的模型请求中可见。
+- 新增忙碌通知回归，修改前失败，修改后通过；独立工作继续执行，正确任务通知恰好一次。最近一次记录为任务结束后 18ms 进入会话。63 秒使用受控时间，进程与会话为真实实现；没有通过 mock 消息队列证明自身。
+- 空闲通知基线等待真实 65 秒通过。日志：`/tmp/async-bash-lifecycle-baseline.log`。忙碌通知：`/tmp/async-bash-busy-red.log`、`/tmp/async-bash-busy-final.log`。类型检查：`/tmp/async-bash-check.log`。
+- 前台运行指引放入 Bash 工具描述，让 Agent 在首次执行前知道已有交接机制。接口、63 秒和 timeout 不变，没有全面阻止 `&` 或合法 readiness 检查。
+- 新增可选 `probes/model-wait.mjs`，只发一条普通用户请求，运行真实 66 秒 fixture，观察是否自行后台化或轮询、完成通知是否触发后续回答、退出码与结果是否正确。此探针使用现有凭据调用真实模型，不纳入默认 npm test。
+- 真实模型 `magpie/workbuddy-ai/deepseek-v4.1-flash` 抽查通过：一次用户请求，fixture 启动一次，模型先检查脚本后前台运行，无 nohup、sleep、日志或状态轮询；完成通知一次，任务结束后 3ms 进入会话，模型自动继续并正确报告 fixture 退出码 7 和 `E2E_SENTINEL_DONE`。模型使用 `node fixture.mjs; echo "EXIT_CODE=$?"`，外层 shell 的退出码为 0；最终回答正确区分了两个退出码。未增加第二条用户提示。
+- 真实模型探针日志：`/tmp/async-bash-live-model.log`；完整 prompt、events、summary、session 保存在 `/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-model-wait-65icBM`。这是一项隔离抽查，不证明所有模型和长会话今后均不会轮询。
+- 完整 `npm test`：16/16 通过，约 264 秒，包含真实 63 秒交接、空闲通知自动接续、RPC 生命周期、reload、会话归属、超时、取消和 compact 兼容。日志：`/tmp/async-bash-regression.log`。完整回归启动后，忙碌场景测试又加强了“通知到达后独立链仍完成 STEP_4”的断言，该最终版本已单独重跑通过：`/tmp/async-bash-busy-final.log`。
+- RPC 记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-AVPa3I`；崩溃恢复记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-YEpF6g`。类型检查、`git diff --check`、真实模型探针语法检查均通过。
+- 未修改用户全局配置，未自动 reload 用户正在运行的会话，未发布或 push。现有 `ARCHITECTURE.md` 为用户已有未跟踪文件，未改动且不纳入本次提交。
+- 当前配置从本地目录加载此扩展；已运行的会话需要执行 `/reload` 或重新启动 Pi 才会使用新的工具描述和投递代码。本次未对用户正在执行任务的其他会话强制重载。
+- 后续 review 按用户确认修正工具说明：只针对末尾 `&` 导致启动命令提前返回及另建 sleep 轮询，不单独禁止 `nohup`。保留原有交接与自动通知说明。此前真实模型抽查针对修正前的说明，不能视为最终措辞的行为验证；已形成等待习惯的长会话尚未验证。用户授权本次提交，不 push。
+- 最终措辞修改后，类型检查通过；忙碌通知及 compact 两种加载顺序 3/3 通过；探针语法及差异空白检查通过。日志：`/tmp/async-bash-final-wording-check.log`、`/tmp/async-bash-final-wording-tests.log`。未重跑完整套件或额外调用真实模型。
+
 ### T6 — compact 兼容与后台 Footer
 
 - 范围：两个本地 ticket 位于 `.scratch/bash-compat-footer/issues/`；串行实施，不创建远端 issue。
