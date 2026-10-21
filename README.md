@@ -2,6 +2,18 @@
 
 Long bash commands no longer hold a tool call hostage.
 
+> **Beta.** The extension works and is published, but some of its design is still unsettled. Treat it as usable for daily work, not as a stable interface.
+>
+> Known design difficulties:
+>
+> - **Completion delivery is scheduled by pi, not by this extension.** A finished task sends one message through pi's steering queue. Delivery happens at a turn boundary the host chooses, and it does not interrupt a running tool batch. In a real session, one completion was observed arriving about 104 minutes late. The extension cannot bound that latency; the most it can do is hand the message over as early as the host allows.
+> - **It depends on host internals.** The handoff reads the local shell backend, and the notification relies on delivery and settle hooks in pi 1.3.0. A pi release that changes those paths can break the extension quietly, without a load error.
+> - **The 63-second threshold is a fixed waiting time, not a configured value.** It is chosen to sit under the default tool timeout and is not adjustable per project.
+> - **It cannot compose another execution backend.** Any other extension that also registers `bash` conflicts with this one; pi picks a definition by load order instead of composing two backends.
+> - **Background state is process-local.** Tasks do not survive quitting pi, are not adopted across processes, and descendants that leave the process group are not tracked.
+>
+> Verified on pi 1.3.0, Node 22.23.2 and macOS only. Windows is untested.
+
 ## What installing it changes
 
 One changed behaviour and one new tool:
