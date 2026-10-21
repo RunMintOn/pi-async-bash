@@ -21,6 +21,16 @@
 
 ## 验证记录
 
+### T8 — 后台状态快照保留历史缓存前缀
+
+- 状态：已完成。本地 ticket 位于 `.scratch/cache-prefix/issues/01-preserve-task-history-prefix.md`；不创建真实 API 对照 ticket，由用户日常使用观察。
+- 将请求时的临时任务状态快照从历史之前移到请求尾部。历史消息及顺序不变，状态变化只影响先前的尾部快照和后续新增内容；任务筛选、16 KiB 恢复预算及通知机制不变。
+- 新增真实 provider 适配器的请求前缀回归，fetch 在本地拦截，不连接模型服务。旧实现先失败，修改后通过；保留请求体供检查。另一场景实际压缩掉原始任务结果，再验证运行中恢复、任务在其他会话期间完成后的终态恢复，以及历史前缀稳定和不重复自动通知。
+- 本地确定性 provider 从最后一条非状态快照消息识别测试指令，使尾部快照不遮挡脚本化工具调用；捕获和前缀比较仍使用完整请求。
+- 完整 `npm test`：18/18 通过，约 266 秒，包含真实 63 秒交接、空闲和忙碌通知、RPC、fork、reload、崩溃恢复及 compact 兼容。日志：`/tmp/async-bash-cache-full.log`。红灯：`/tmp/async-bash-cache-red.log`；类型检查：`/tmp/async-bash-cache-check.log`；`git diff --check` 通过。
+- 请求体：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-test-1FQdb0/prefix-requests.json`；恢复请求体：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-test-KHKzMS/restored-prefix-requests.json`；RPC：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-Z4rWG6`。
+- 未调用真实模型 API，未修改全局配置或自动重载用户其他会话。用户随后授权提交并 push，但不发布 npm 包或 Release；README Beta 已说明尾部快照仍可能影响最近上下文的缓存复用，更好的机制仍在探索。已有未跟踪的 `ARCHITECTURE.md` 未改动且不纳入提交。已加载旧扩展的会话需 `/reload` 或重启 Pi 才能使用修复。
+
 ### T7 — 活跃工具循环中的完成通知与等待行为
 
 - 状态：已完成。通知修复、快速验证、完整回归与真实模型行为抽查均通过。

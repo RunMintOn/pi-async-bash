@@ -6,6 +6,7 @@ Long bash commands no longer hold a tool call hostage.
 >
 > Known design difficulties:
 >
+> - **Prompt-cache preservation is still being improved.** Task-state snapshots are currently added temporarily at the end of each model request. This avoids inserting changing state before the conversation history, but the snapshot moves as the conversation grows. Recent context after the previous snapshot may therefore need to be processed again rather than read from cache. We are still exploring a better mechanism; the current approach does not guarantee full cache reuse.
 > - **Completion delivery is scheduled by pi, not by this extension.** A finished task sends one message through pi's steering queue. Delivery happens at a turn boundary the host chooses, and it does not interrupt a running tool batch. In a real session, one completion was observed arriving about 104 minutes late. The extension cannot bound that latency; the most it can do is hand the message over as early as the host allows.
 > - **It depends on host internals.** The handoff reads the local shell backend, and the notification relies on delivery and settle hooks in pi 1.3.0. A pi release that changes those paths can break the extension quietly, without a load error.
 > - **The 63-second threshold is a fixed waiting time, not a configured value.** It is chosen to sit under the default tool timeout and is not adjustable per project.
@@ -167,6 +168,8 @@ Automatic handoff releases only that one bash call. When the same batch contains
 ## Output and state
 
 Completion notifications and `status` include at most 100 log lines and 16 KiB. Restored context has a separate 16 KiB total budget and does not repeatedly inject full logs.
+
+Task-state snapshots are appended after conversation history, preserving the older prefix before the previous snapshot. The transient snapshot moves as the conversation grows, so recent context after its previous position may still lose cache reuse. See the Beta notes above.
 
 Statuses are `running`, `exited`, `killed`, `timed_out`, `failed` and `unknown`. A non-zero exit is still `exited`, with the exit code kept separately. Querying a failed task with `status` is not itself a tool error; `kill` on a failing terminal state is marked as an error.
 

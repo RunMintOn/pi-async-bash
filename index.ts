@@ -130,10 +130,11 @@ export default function asyncBash(pi: ExtensionAPI) {
       bytes += size;
     }
     if (!summaries.length) return;
-    return { messages: [{
+    // Keep changing task snapshots after history so they do not invalidate its cached prefix.
+    return { messages: [...event.messages, {
       role: "custom" as const, customType: "async-bash-state",
       content: summaries.join("\n"), display: false, timestamp: Date.now(),
-    }, ...event.messages] };
+    }] };
   });
   pi.on("session_shutdown", async (event) => {
     unbind();

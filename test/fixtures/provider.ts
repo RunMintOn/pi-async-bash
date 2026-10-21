@@ -13,7 +13,11 @@ export default function localProvider(pi: ExtensionAPI) {
     }],
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
-      const last = context.messages.at(-1)!;
+      const last = context.messages.findLast((m) => {
+        const text = typeof m.content === "string" ? m.content :
+          m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+        return m.role !== "user" || !/^Task [\da-f-]+: \w+; exit_code=.*; log=/.test(text);
+      })!;
       const text = typeof last.content === "string" ? last.content :
         last.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
       const calls = last.role === "user" && text.startsWith("CALL ") ? JSON.parse(text.slice(5)) : [];

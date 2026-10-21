@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
-import { harness, eventOnce, textOf } from "./support.mjs";
+import { harness, eventOnce, textOf, lastConversationMessage } from "./support.mjs";
 
 test("completion reaches the next model request while the agent keeps using tools", { timeout: 10000 }, async (t) => {
   const h = await harness({}, [], {
     calls(context) {
-      const last = context.messages.at(-1);
+      const last = lastConversationMessage(context);
       const canContinue = last?.role === "toolResult" || textOf(last).includes("Background bash task finished.");
       const previous = context.messages.findLast((m) => m.role === "toolResult" && /^STEP_\d+$/.test(textOf(m)));
       const step = canContinue && previous && /^STEP_(\d+)$/.exec(textOf(previous));

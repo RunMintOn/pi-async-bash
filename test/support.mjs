@@ -9,6 +9,8 @@ export const { createAssistantMessageEventStream } = await import("@earendil-wor
 export const extensionPath = resolve("index.ts");
 export const textOf = (m) => typeof m.content === "string" ? m.content :
   (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+export const isTaskState = (m) => m.role === "user" && /^Task [\da-f-]+: \w+; exit_code=.*; log=/.test(textOf(m));
+export const lastConversationMessage = (context) => context.messages.findLast((m) => !isTaskState(m));
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export function eventOnce(session, predicate, timeout = 45000) {
   return new Promise((resolve, reject) => {
@@ -39,7 +41,7 @@ export async function harness(settings = {}, extensionFactories = [], options = 
       const stream = createAssistantMessageEventStream();
       const texts = context.messages.map(textOf);
       requests.push({ at: Date.now(), texts });
-      const last = context.messages.at(-1);
+      const last = lastConversationMessage(context);
       const request = last.role === "user" ? commands.get(textOf(last)) : undefined;
       const calls = options.calls?.(context) ?? (request ? (Array.isArray(request) ? request : [request]) : []);
       const msg = {
