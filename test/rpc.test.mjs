@@ -1,151 +1,108 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { spawnSync } from "node:child_process";
 import { TestRpc } from "./rpc-client.mjs";
-import { textOf } from "./support.mjs";
+import { assertProcessResult, node, quote, textOf } from "./support.mjs";
 
-test("real RPC: automatic handoff, nested structured output, controls, reload, session ownership and quit", { timeout: 150000 }, async (t) => {
+function assertStopped(pid) {
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert(state === "" || state.startsWith("Z"), "process still running: " + pid + " " + state);
+}
+
+test("real RPC: model waits for a result, nested sessions survive reload and fork, PTY Ctrl+C and quit clean up", { timeout: 45000 }, async (t) => {
   const rpc = new TestRpc();
   let reopened;
-  t.diagnostic(`RPC artifacts: ${rpc.dir}`);
+  t.diagnostic("RPC artifacts: " + rpc.dir);
   try {
-    const initial = await rpc.ready();
-    const owner = initial.sessionId;
-    const gate = (name) => join(rpc.dir, name);
-    const hold = (name, exit = 0) => `printf 'early\\n'; while [ ! -f '${gate(name)}' ]; do sleep 0.05; done; printf 'late\\n'; exit ${exit}`;
-    const since = rpc.events.length;
-    const batch = [
-      { name: "bash", args: { command: hold("notify", 9), timeout: 150 } },
-      { name: "bash", args: { command: "printf timed; sleep 100", timeout: 66 } },
-      { name: "bash", args: { command: `sleep 100 & echo $! > '${gate("child.pid")}'; wait`, timeout: 150 } },
-      { name: "codemode", args: { code: `const r = await tools.bash(${JSON.stringify({
-        command: `echo $$ > '${gate("nested.pid")}'; "${process.execPath}" -e 'process.stdout.write("中".repeat(100000))'; ${hold("nested")}`, timeout: 150,
-      })}); return r;` } },
-    ];
-    const results = await rpc.prompt("CALL " + JSON.stringify(batch));
-    assert.equal(results.length, 4);
-    const [notify, timed, kill, nested] = results;
-    const id = notify.details.task_id;
-    assert.equal(notify.details.status, "running");
-    assert.equal(timed.details.status, "running");
-    assert.equal(kill.details.status, "running");
-    assert.match(textOf(nested), /"task_id":/);
-    assert.match(textOf(nested), /"status":"running"/);
-    const nestedId = textOf(nested).match(/"task_id":"([^"]+)"/)[1];
-    const ownerFile = (await rpc.send("get_state")).sessionFile;
-    await rpc.send("clone");
-    await rpc.prompt("STATE_NESTED_FORK");
-    assert((await rpc.send("get_last_assistant_text")).text.includes(nestedId), "fork lost the task reference returned through codemode");
-    await rpc.send("switch_session", { sessionPath: ownerFile });
-    const processed = await rpc.prompt("USER_BEFORE_COMPLETION");
-    assert.deepEqual(processed, []);
-    assert(!rpc.events.slice(since).some((e) => e.type === "message_end" && e.message.role === "custom" && e.message.details?.task_id === id));
+    await rpc.ready();
+    const journey = await rpc.prompt("RUN " + JSON.stringify({
+      command: node('process.stdout.write("JOURNEY_START\\n"); setTimeout(() => { process.stdout.write("JOURNEY_DONE\\n"); process.exit(7); }, 900);'),
+      yield_time_ms: 250,
+    }));
+    assert.equal(journey.length, 2);
+    assert.equal(journey[0].toolName, "bash");
+    assert.equal(journey[1].toolName, "write_stdin");
+    assert.equal(typeof journey[0].details.session_id, "number");
+    assertProcessResult(journey[1].details, { output: "JOURNEY_DONE\n", exit_code: 7 });
+    assert.match((await rpc.send("get_last_assistant_text")).text, /JOURNEY_DONE/);
+    const nonzero = await rpc.call("codemode", {
+      code: 'return await tools.bash({ command: "printf NESTED_FAILURE; exit 7" });',
+    });
+    assert.match(textOf(nonzero), /"output":"NESTED_FAILURE"/);
+    assert.match(textOf(nonzero), /"exit_code":7/);
+    assert.match(textOf(nonzero), /"truncated":false/);
+    assert.match(textOf(nonzero), /"wall_time_seconds":[\d.]+/);
 
-    const entries = await rpc.send("get_entries");
-    const startEntry = entries.entries.find((e) => e.type === "message" && e.message.role === "toolResult" && e.message.details?.task_id === id);
-    assert(startEntry);
+    const inputCommand = node('process.stdout.write("NESTED_READY\\n"); process.stdin.on("data", data => process.stdout.write("NESTED:" + data));');
+    const nested = await rpc.call("codemode", {
+      code: `return await tools.bash(${JSON.stringify({ command: inputCommand, yield_time_ms: 250 })});`,
+    });
+    const id = Number(textOf(nested).match(/"session_id":(\d+)/)?.[1]);
+    assert(Number.isInteger(id) && id > 0, textOf(nested));
+    const owner = (await rpc.send("get_state")).sessionFile;
     await rpc.send("prompt", { message: "/test-reload" });
-    const stillRunning = await rpc.call("bash_task", { task_id: id, action: "status" });
-    assert.equal(stillRunning.details.status, "running");
-    assert.match(textOf(stillRunning), /early/);
-
-    const killed = await rpc.call("bash_task", { task_id: kill.details.task_id, action: "kill" });
-    assert.equal(killed.details.status, "killed");
-    const childPid = Number(readFileSync(gate("child.pid"), "utf8"));
-    const alive = (() => { try { process.kill(childPid, 0); return true; } catch { return false; } })();
-    if (alive) {
-      // Some systems briefly retain a killed descendant as a zombie.
-      const { spawnSync } = await import("node:child_process");
-      const state = spawnSync("ps", ["-o", "stat=", "-p", String(childPid)], { encoding: "utf8" }).stdout.trim();
-      assert(state === "" || state.startsWith("Z"), `child still running: ${state}`);
-    }
-
-    const timeoutNotice = await rpc.wait((e) => e.type === "message_end" &&
-      e.message.role === "custom" && e.message.details?.task_id === timed.details.task_id);
-    await rpc.wait((e) => e.type === "agent_settled", rpc.events.indexOf(timeoutNotice) + 1);
-    const timeoutResult = await rpc.call("bash_task", { task_id: timed.details.task_id, action: "status" });
-    assert.equal(timeoutResult.details.status, "timed_out");
-    assert.notEqual(timeoutResult.isError, true);
-    assert.match(textOf(timeoutResult), /timed/);
-    assert(timeoutResult.details.wall_time_seconds < 70, "execution timeout was reset at handoff");
-
+    const afterReload = await rpc.call("codemode", {
+      code: `return await tools.write_stdin(${JSON.stringify({ session_id: id, chars: "reload\n" })});`,
+    });
+    assert.match(textOf(afterReload), /NESTED:reload/);
+    assert.match(textOf(afterReload), /"truncated":false/);
+    assert.match(textOf(afterReload), /"wall_time_seconds":[\d.]+/);
     await rpc.send("new_session");
-    assert.notEqual((await rpc.send("get_state")).sessionId, owner);
-    const awayAt = rpc.events.length;
-    writeFileSync(gate("notify"), "");
-    await delay(100);
-    assert(!rpc.events.slice(awayAt).some((e) => e.type === "message_end" && e.message.role === "custom" && e.message.details?.task_id === id));
-    await rpc.send("switch_session", { sessionPath: ownerFile });
-    const resumeAt = rpc.events.length;
-    await rpc.prompt("STATE_AFTER_RESUME");
-    assert.match((await rpc.send("get_last_assistant_text")).text, new RegExp(`Task ${id}: exited; exit_code=9`));
-    assert(!rpc.events.slice(resumeAt).some((e) => e.type === "message_end" && e.message.role === "custom"));
-    const final = await rpc.call("bash_task", { task_id: id, action: "status" });
-    assert.equal(final.details.exit_code, 9);
-    assert.equal(readFileSync(final.details.log_path, "utf8"), "early\nlate\n");
-    await rpc.send("prompt", { message: `/test-tree ${startEntry.id}` });
-    assert.equal((await rpc.send("get_state")).sessionId, owner);
-    const treeAt = rpc.events.length;
-    await rpc.prompt("USER_AFTER_TREE");
-    assert(!rpc.events.slice(treeAt).some((e) => e.type === "message_end" && e.message.role === "custom"));
+    const denied = await rpc.call("write_stdin", { session_id: id, chars: "bad\n" });
+    assert.equal(denied.isError, true);
+    await rpc.send("switch_session", { sessionPath: owner });
     await rpc.send("clone");
-    assert.notEqual((await rpc.send("get_state")).sessionId, owner);
-    const inherited = await rpc.call("bash_task", { task_id: id, action: "status" });
-    assert.equal(inherited.details.owner_session_id, owner);
-    assert.equal(inherited.details.exit_code, 9);
+    const inherited = await rpc.call("write_stdin", { session_id: id, chars: "fork\n" });
+    assert.equal(inherited.details.output, "NESTED:fork\n");
 
-    const short = await rpc.call("codemode", { code: "return await tools.bash({command: 'printf structured; exit 7'});" });
-    assert.match(textOf(short), /"exit_code":7/);
-    assert.match(textOf(short), /"output":"structured"/);
-    const nestedStatus = await rpc.call("bash_task", { task_id: nestedId, action: "status" });
-    assert.equal(nestedStatus.details.status, "running");
-    assert(Buffer.byteLength(nestedStatus.details.output) <= 16384);
-    assert(!nestedStatus.details.output.includes("\uFFFD"));
-    assert(nestedStatus.details.total_bytes >= 300000);
+    const pty = await rpc.call("bash", {
+      command: "exec " + node('process.stdout.write("PTY_RPC_READY\\n"); process.stdin.resume(); process.on("SIGINT", () => { process.stdout.write("PTY_RPC_INTERRUPTED\\n"); process.exit(130); });'),
+      tty: true, yield_time_ms: 250,
+    });
+    assert.equal(typeof pty.details.session_id, "number", textOf(pty));
+    const interrupted = await rpc.call("write_stdin", { session_id: pty.details.session_id, chars: "\u0003", yield_time_ms: 1000 });
+    assert.equal(interrupted.details.exit_code, 130);
+    assert.match(interrupted.details.output, /PTY_RPC_INTERRUPTED/);
+
+    const quitProcesses = [];
+    for (const tty of [false, true]) {
+      const path = join(rpc.dir, tty ? "quit-pty.pid" : "quit-pipe.pid");
+      const started = await rpc.call("bash", {
+        command: `echo $$ > ${quote(path)}; exec sleep 100`, tty, yield_time_ms: 250,
+      });
+      assert.equal(typeof started.details.session_id, "number");
+      quitProcesses.push({ id: started.details.session_id, pid: Number(readFileSync(path, "utf8")) });
+    }
+    assert(!rpc.events.some(event => event.type === "message_end" && event.message.role === "custom"),
+      "the runtime injected completion or snapshot messages");
     await rpc.close();
-    const nestedPid = Number(readFileSync(gate("nested.pid"), "utf8"));
-    const { spawnSync } = await import("node:child_process");
-    const state = spawnSync("ps", ["-o", "stat=", "-p", String(nestedPid)], { encoding: "utf8" }).stdout.trim();
-    assert(state === "" || state.startsWith("Z"), `task still running after quit: ${state}`);
+    for (const entry of quitProcesses) assertStopped(entry.pid);
     reopened = new TestRpc(rpc.dir);
     await reopened.ready();
-    const persisted = await reopened.call("bash_task", { task_id: nestedId, action: "status" });
-    assert.equal(persisted.details.status, "killed");
-    assert(!/stale|uncaught|unhandled/i.test(rpc.stderr), rpc.stderr);
+    for (const entry of quitProcesses) {
+      const unavailable = await reopened.call("write_stdin", { session_id: entry.id });
+      assert.equal(unavailable.isError, true);
+      assert.match(textOf(unavailable), /Unknown or unavailable/);
+    }
+    assert(!/uncaught|unhandled/i.test(rpc.stderr), rpc.stderr);
   } finally { await reopened?.close(); await rpc.close(); }
 });
 
-test("after a real pi crash, a new runtime reports unknown and never adopts the old process", { timeout: 95000 }, async (t) => {
-  const original = new TestRpc();
-  let restored;
-  let shellPid;
-  t.diagnostic(`Crash/recovery artifacts: ${original.dir}`);
+test("terminating the real Pi process cleans its managed pipe and PTY children", { timeout: 20000 }, async (t) => {
+  const rpc = new TestRpc();
+  t.diagnostic("Signal-cleanup artifacts: " + rpc.dir);
   try {
-    await original.ready();
-    const pidFile = join(original.dir, "crash-shell.pid");
-    const running = await original.call("bash", {
-      command: `echo $$ > '${pidFile}'; printf crash-start; sleep 100`,
-      timeout: 90,
-    });
-    const id = running.details.task_id;
-    assert.equal(running.details.status, "running");
-    shellPid = Number(readFileSync(pidFile, "utf8"));
-    original.child.kill("SIGKILL");
-    await original.exited;
-    restored = new TestRpc(original.dir);
-    await restored.ready();
-    const status = await restored.call("bash_task", { task_id: id, action: "status" });
-    assert.equal(status.details.status, "unknown");
-    assert.equal(status.details.exit_code, null);
-    const kill = await restored.call("bash_task", { task_id: id, action: "kill" });
-    assert.equal(kill.details.status, "unknown");
-    process.kill(shellPid, 0);
-    assert.equal(kill.isError, true);
-  } finally {
-    await restored?.close();
-    await original.close();
-    if (shellPid) try { process.kill(-shellPid, "SIGKILL"); } catch {}
-  }
+    await rpc.ready();
+    const children = [];
+    for (const tty of [false, true]) {
+      const file = join(rpc.dir, tty ? "signal-pty.pid" : "signal-pipe.pid");
+      await rpc.call("bash", { command: `echo $$ > ${quote(file)}; exec sleep 100`, tty, yield_time_ms: 250 });
+      children.push(Number(readFileSync(file, "utf8")));
+    }
+    rpc.child.kill("SIGTERM");
+    await rpc.exited;
+    for (const pid of children) assertStopped(pid);
+  } finally { await rpc.close(); }
 });

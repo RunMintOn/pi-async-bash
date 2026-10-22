@@ -13,23 +13,22 @@ export default function localProvider(pi: ExtensionAPI) {
     }],
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
-      const last = context.messages.findLast((m) => {
-        const text = typeof m.content === "string" ? m.content :
-          m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-        return m.role !== "user" || !/^Task [\da-f-]+: \w+; exit_code=.*; log=/.test(text);
-      })!;
+      const last = context.messages.at(-1)!;
       const text = typeof last.content === "string" ? last.content :
         last.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-      const calls = last.role === "user" && text.startsWith("CALL ") ? JSON.parse(text.slice(5)) : [];
-      const state = text.startsWith("STATE_") ? context.messages
-        .filter((m) => m.role === "user")
-        .map((m) => typeof m.content === "string" ? m.content : m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"))
-        .filter((s) => s.startsWith("Task ")).join("\n") : "";
+      const user = context.messages.findLast(m => m.role === "user");
+      const userText = typeof user?.content === "string" ? user.content :
+        user?.content.filter(c => c.type === "text").map(c => c.text).join("\n") ?? "";
+      const session = text.match(/Process running with session ID (\d+)/)?.[1];
+      const calls = last.role === "user" && text.startsWith("CALL ") ? JSON.parse(text.slice(5)) :
+        last.role === "user" && text.startsWith("RUN ") ? [{ name: "bash", args: JSON.parse(text.slice(4)) }] :
+        last.role === "toolResult" && userText.startsWith("RUN ") && session ?
+          [{ name: "write_stdin", args: { session_id: Number(session), yield_time_ms: 300000 } }] : [];
       const message = {
         role: "assistant" as const, api: model.api, provider: model.provider, model: model.id,
         content: calls.length ? calls.map((call: { name: string; args: object }) => ({
           type: "toolCall" as const, id: `call-${++sequence}`, name: call.name, arguments: call.args,
-        })) : [{ type: "text" as const, text: state || `ACK ${text.slice(0, 500)}` }],
+        })) : [{ type: "text" as const, text: `ACK ${text.slice(0, 500)}` }],
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         stopReason: calls.length ? "toolUse" as const : "stop" as const, timestamp: Date.now(),

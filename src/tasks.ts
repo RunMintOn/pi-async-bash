@@ -1,275 +1,349 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { randomInt } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { constants as osConstants } from "node:os";
+import { closeSync, mkdirSync, openSync, readSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { truncateTail } from "@earendil-works/pi-coding-agent";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { stripVTControlCharacters } from "node:util";
+import { DEFAULT_MAX_BYTES, truncateTail } from "@earendil-works/pi-coding-agent";
+import { spawn as spawnPty } from "node-pty";
 
-type Result = AgentToolResult<unknown> & { structuredContent?: unknown; isError?: boolean };
-export type TaskStatus = "running" | "exited" | "killed" | "timed_out" | "failed" | "unknown";
-export interface TaskRecord {
-  task_id: string;
-  owner_session_id: string;
-  cwd: string;
-  status: TaskStatus;
-  log_path: string;
+export interface ProcessResult {
+  output: string;
+  truncated: boolean;
+  full_output_path?: string;
+  exit_code?: number;
+  session_id?: number;
+}
+
+export interface ProcessRecord {
+  session_id: number;
+  owner: string;
   started_at: number;
-  finished_at?: number;
-  exit_code: number | null;
-  total_bytes: number;
-  total_lines: number | null;
-  error?: string;
-}
-interface LiveTask {
-  record: TaskRecord;
-  controller: AbortController;
   handed: boolean;
-  stopRequested: boolean;
-  done: Promise<void>;
+  exit_code?: number;
 }
-type Outcome = { result: Result } | { error: Error };
-const handoffMs = 63_000;
-const taskIdPattern = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 
-export function eventId(task: TaskRecord) {
-  return `${task.task_id}:terminal`;
+export interface Access {
+  owner: string;
+  references: Set<number>;
 }
+
+interface Execution extends ProcessRecord {
+  path: string;
+  fd: number;
+  bytes: number;
+  cursor: number;
+  error?: Error;
+  done: Promise<void>;
+  finish: () => void;
+  queue: Promise<void>;
+  updates: Set<() => void>;
+  write: (text: string) => Promise<void>;
+  kill: () => void;
+}
+
+function aborted(): Error { return new Error("Command interaction aborted."); }
 
 function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
-    const abort = () => { cleanup(); reject(new Error("Task control aborted.")); };
+    const abort = () => { cleanup(); reject(aborted()); };
     const cleanup = () => signal?.removeEventListener("abort", abort);
     if (signal?.aborted) return abort();
     signal?.addEventListener("abort", abort, { once: true });
-    promise.then((value) => { cleanup(); resolve(value); }, (error) => { cleanup(); reject(error); });
+    promise.then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
   });
 }
 
-export class TaskManager {
-  private readonly instance = randomUUID();
-  private readonly live = new Map<string, LiveTask>();
-  private readonly listeners = new Set<(record: TaskRecord) => void>();
+function waitingTime(value: number | undefined, kind: "start" | "poll" | "input"): number {
+  const [fallback, minimum, maximum] = kind === "start" ? [10000, 250, 30000] :
+    kind === "poll" ? [5000, 5000, 300000] : [250, 250, 30000];
+  return Math.floor(Math.min(maximum, Math.max(minimum, value ?? fallback)));
+}
+
+export class ProcessManager {
+  private readonly processes = new Map<number, Execution>();
+  private readonly listeners = new Set<() => void>();
   private closing = false;
+  private readonly onExit = () => {
+    for (const task of this.processes.values()) if (task.exit_code === undefined) task.kill();
+  };
 
   constructor(private readonly directory: string) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
 
-  private save(record: TaskRecord) {
-    const path = join(this.directory, `${record.task_id}.json`);
-    const temporary = `${path}.${this.instance}.tmp`;
-    writeFileSync(temporary, JSON.stringify(record), { mode: 0o600 });
-    renameSync(temporary, path);
-  }
-
-  subscribe(listener: (record: TaskRecord) => void) {
+  subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
 
+  private changed() { for (const listener of this.listeners) listener(); }
+
+  private get(id: number, access: Access): Execution {
+    const task = this.processes.get(id);
+    if (!task || (task.owner !== access.owner && !access.references.has(id))) {
+      throw new Error("Unknown or unavailable command session: " + id);
+    }
+    return task;
+  }
+
   async execute(options: {
     owner: string;
+    command: string;
     cwd: string;
-    timeout?: number;
+    shell: string;
+    args: string[];
+    env: NodeJS.ProcessEnv;
+    tty: boolean;
+    yield_time_ms?: number;
     signal?: AbortSignal;
-    run: (signal: AbortSignal, log: (data: Buffer) => void, started: () => void) => Promise<Result>;
-  }): Promise<Result> {
-    if (this.closing) throw new Error("pi is shutting down.");
-    let id: string;
+    update?: (output: string) => void;
+  }): Promise<ProcessResult> {
+    if (this.closing) throw new Error("Pi is shutting down.");
+    if (process.platform === "win32") throw new Error("This extension currently supports macOS and Linux only.");
+    if (options.signal?.aborted) throw aborted();
+    let id: number;
     let fd: number;
+    let path: string;
     while (true) {
-      id = randomBytes(4).toString("hex");
-      if (this.live.has(id) || existsSync(join(this.directory, `${id}.json`))) continue;
-      try {
-        // Exclusive creation also reserves the ID against other pi processes.
-        fd = openSync(join(this.directory, `${id}.log`), "wx", 0o600);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
+      id = randomInt(1, 0x7fffffff);
+      path = join(this.directory, id + ".log");
+      try { fd = openSync(path, "wx", 0o600); break; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     }
-    const record: TaskRecord = {
-      task_id: id, owner_session_id: options.owner,
-      cwd: options.cwd, status: "running", log_path: join(this.directory, `${id}.log`),
-      started_at: Date.now(), exit_code: null, total_bytes: 0, total_lines: 0,
-    };
-    const controller = new AbortController();
     let finish!: () => void;
-    const task: LiveTask = {
-      record, controller, handed: false, stopRequested: false,
-      done: new Promise<void>((resolve) => { finish = resolve; }),
+    const task: Execution = {
+      session_id: id, owner: options.owner, started_at: Date.now(), handed: false,
+      path, fd, bytes: 0, cursor: 0,
+      done: new Promise(resolve => { finish = resolve; }), finish: () => finish(),
+      queue: Promise.resolve(), updates: new Set(),
+      write: async () => { throw new Error("Command is not ready."); }, kill: () => {},
     };
-    this.live.set(id, task);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let lastByte: number | undefined;
-    let newlines = 0;
-    let logError: Error | undefined;
-    let release!: () => void;
-    const threshold = new Promise<"handoff">((resolve) => { release = () => resolve("handoff"); });
-    const abort = () => controller.abort();
-    if (options.signal?.aborted) abort();
-    options.signal?.addEventListener("abort", abort, { once: true });
-    const started = () => {
-      record.started_at = Date.now();
-      // A shorter execution timeout must settle as a foreground timeout.
-      if (options.timeout === undefined || options.timeout * 1000 > handoffMs) timer = setTimeout(release, handoffMs);
+    this.processes.set(id, task);
+    if (this.processes.size === 1) process.once("exit", this.onExit);
+    const settle = (code: number, error?: Error) => {
+      if (task.exit_code !== undefined) return;
+      task.exit_code = code;
+      task.error ??= error;
+      try { closeSync(task.fd); }
+      catch (error) { task.error ??= error instanceof Error ? error : new Error(String(error)); }
+      task.write = async () => { throw new Error("Command session has already exited."); };
+      task.kill = () => {};
+      task.finish();
+      this.changed();
     };
     const log = (data: Buffer) => {
-      if (logError) return;
+      if (task.exit_code !== undefined) return;
       try {
         let offset = 0;
-        while (offset < data.length) offset += writeSync(fd, data, offset, data.length - offset);
-        record.total_bytes += data.length;
-        for (const byte of data) if (byte === 10) newlines++;
-        if (data.length) lastByte = data[data.length - 1];
-        record.total_lines = newlines + (lastByte !== undefined && lastByte !== 10 ? 1 : 0);
+        while (offset < data.length) offset += writeSync(task.fd, data, offset, data.length - offset);
+        task.bytes += data.length;
+        for (const update of task.updates) update();
       } catch (error) {
-        logError = error instanceof Error ? error : new Error(String(error));
-        controller.abort();
+        task.error = error instanceof Error ? error : new Error(String(error));
+        task.kill();
       }
     };
-    const settle = (outcome: Outcome): Outcome => {
-      if (timer) clearTimeout(timer);
-      record.finished_at = Date.now();
-      if ("result" in outcome) {
-        const data = outcome.result.structuredContent as { exit_code?: number } | undefined;
-        record.exit_code = data?.exit_code ?? null;
-        record.status = "exited";
-      } else {
-        record.error = truncateTail(logError?.message ?? outcome.error.message, { maxLines: 1, maxBytes: 1024 }).content;
-        record.status = logError ? "failed" : task.stopRequested ? "killed" :
-          /Command timed out after [\d.]+ seconds$/.test(outcome.error.message) ? "timed_out" : "failed";
-      }
-      try {
-        closeSync(fd);
-        if (task.handed) this.save(record);
-      } catch (error) {
-        outcome = { error: error instanceof Error ? error : new Error(String(error)) };
-        record.error = `Cannot save task result: ${outcome.error.message}`;
-        record.status = "failed";
-      } finally {
-        this.live.delete(id);
-        finish();
-      }
-      if (task.handed) {
-        for (const listener of this.listeners) listener({ ...record });
-      }
-      return outcome;
-    };
-    const execution = Promise.resolve()
-      .then(() => options.run(controller.signal, log, started))
-      .then((result) => settle({ result }), (error: unknown) =>
-        settle({ error: error instanceof Error ? error : new Error(String(error)) }));
     try {
-      const outcome = await Promise.race([execution, threshold]);
-      if (outcome !== "handoff" || record.status !== "running" || controller.signal.aborted || this.closing) {
-        const completed = outcome === "handoff" ? await execution : outcome;
-        if ("error" in completed) throw completed.error;
-        return completed.result;
-      }
-      // Persist before dropping the turn's abort listener: the reference is recoverable even if the turn aborts now.
-      this.save(record);
-      task.handed = true;
-      return {
-        content: [{ type: "text", text:
-          `Still running after 63 seconds. Task: ${id}\nLog: ${record.log_path}\n` +
-          "You will be notified when it finishes. Do not poll. " +
-          "Continue work that does not depend on this result. If none remains, end your turn and resume when notified.\n" +
-          "The task stops when pi exits; any execution timeout still applies." }],
-        details: { ...record },
-        structuredContent: { ...record, wall_time_seconds: (Date.now() - record.started_at) / 1000 },
-      };
+      if (options.tty) this.startPty(task, options, log, settle);
+      else this.startPipe(task, options, log, settle);
     } catch (error) {
-      if (record.status === "running") {
-        task.stopRequested = true;
-        controller.abort();
-        await execution;
-      }
+      settle(1, error instanceof Error ? error : new Error(String(error)));
+    }
+    const abort = () => task.kill();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    try {
+      const result = await this.interact(task, "", waitingTime(options.yield_time_ms, "start"), options.signal, options.update);
+      if (options.signal?.aborted) throw aborted();
+      task.handed = result.session_id !== undefined;
+      this.changed();
+      return result;
+    } catch (error) {
+      if (task.exit_code === undefined) { task.kill(); await task.done; }
       throw error;
     } finally {
       options.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
     }
   }
 
-  get(id: string): TaskRecord {
-    if (!taskIdPattern.test(id)) throw new Error("Invalid task_id.");
-    const active = this.live.get(id);
-    if (active?.handed) return { ...active.record };
-    const path = join(this.directory, `${id}.json`);
-    if (!existsSync(path)) throw new Error(`Unknown task: ${id}`);
-    const record = JSON.parse(readFileSync(path, "utf8")) as TaskRecord;
-    if (record.task_id !== id) throw new Error(`Invalid task record: ${id}`);
-    if (record.status === "running") {
-      // Another pi process may still own it. Never adopt or kill based on a persisted PID.
-      return { ...record, status: "unknown", total_lines: null, error: "Execution belongs to an unavailable pi runtime; exit result is unknown." };
-    }
-    return record;
+  private startPipe(
+    task: Execution,
+    options: { shell: string; args: string[]; command: string; cwd: string; env: NodeJS.ProcessEnv },
+    log: (data: Buffer) => void,
+    settle: (code: number, error?: Error) => void,
+  ) {
+    const child: ChildProcessWithoutNullStreams = spawn(options.shell, [...options.args, options.command], {
+      cwd: options.cwd, env: options.env, detached: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    task.kill = () => {
+      if (!child.pid || task.exit_code !== undefined) return;
+      try { process.kill(-child.pid, "SIGKILL"); }
+      catch { try { child.kill("SIGKILL"); } catch {} }
+    };
+    task.write = text => new Promise((resolve, reject) => {
+      child.stdin.write(text, error => error ? reject(error) : resolve());
+    });
+    child.stdin.on("error", () => {});
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    let exited = false;
+    let code = 1;
+    const finish = () => {
+      if (drainTimer) clearTimeout(drainTimer);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      settle(code);
+    };
+    // Adapt Pi 1.4.0 waitForChildProcess: active output resets the post-exit grace.
+    const armDrainTimer = () => {
+      if (drainTimer) clearTimeout(drainTimer);
+      drainTimer = setTimeout(finish, 100);
+    };
+    const onData = (data: Buffer) => {
+      log(data);
+      if (exited) armDrainTimer();
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.once("error", error => { settle(1, error); });
+    child.once("exit", (exitCode, signal) => {
+      exited = true;
+      code = exitCode ?? (signal ? 128 + osConstants.signals[signal] : 1);
+      // Clean the group now; retaining its ID after exit risks signalling a reused group.
+      if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+      // Descendants outside the group can still retain inherited pipes.
+      armDrainTimer();
+    });
+    child.once("close", finish);
   }
 
-  async control(id: string, action: "status" | "kill", signal?: AbortSignal): Promise<Result> {
-    let record = this.get(id);
-    if (action === "kill" && record.status === "running") {
-      const task = this.live.get(id)!;
-      task.stopRequested = true;
-      task.controller.abort();
-      await abortable(task.done, signal);
-      record = this.get(id);
-    }
-    return this.describe(record, action !== "status");
+  private startPty(
+    task: Execution,
+    options: { shell: string; args: string[]; command: string; cwd: string; env: NodeJS.ProcessEnv },
+    log: (data: Buffer) => void,
+    settle: (code: number, error?: Error) => void,
+  ) {
+    const terminal = spawnPty(options.shell, [...options.args, options.command], {
+      cwd: options.cwd, env: options.env, name: "xterm-256color", cols: 80, rows: 24,
+    });
+    task.kill = () => {
+      if (task.exit_code !== undefined) return;
+      try { process.kill(-terminal.pid, "SIGKILL"); } catch {}
+      try { terminal.kill("SIGKILL"); } catch {}
+    };
+    task.write = async text => { terminal.write(text); };
+    const data = terminal.onData(text => log(Buffer.from(text)));
+    const exit = terminal.onExit(({ exitCode, signal }) => {
+      try { process.kill(-terminal.pid, "SIGKILL"); } catch {}
+      data.dispose();
+      exit.dispose();
+      settle(signal ? 128 + signal : exitCode);
+    });
   }
 
-  describe(record: TaskRecord, reportFailure = false): Result {
-    const size = statSync(record.log_path).size;
-    const fd = openSync(record.log_path, "r");
-    let tail: string;
+  async input(id: number, chars: string, yieldTime: number | undefined, access: Access,
+    signal?: AbortSignal, update?: (output: string) => void): Promise<ProcessResult> {
+    return this.interact(this.get(id, access), chars, waitingTime(yieldTime, chars ? "input" : "poll"), signal, update);
+  }
+
+  private async interact(task: Execution, chars: string, milliseconds: number,
+    signal?: AbortSignal, update?: (output: string) => void): Promise<ProcessResult> {
+    const previous = task.queue;
+    let release!: () => void;
+    task.queue = new Promise(resolve => { release = resolve; });
+    let acquired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let updateTimer: ReturnType<typeof setTimeout> | undefined;
+    const changed = () => {
+      if (update && !updateTimer) updateTimer = setTimeout(() => {
+        updateTimer = undefined;
+        // A failed streaming preview must not crash Pi; the final read reports I/O errors.
+        try { update(this.read(task, false).output); } catch {}
+      }, 100);
+    };
     try {
-      const bytes = Buffer.alloc(Math.min(size, 16384 + 4));
-      readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length));
-      let offset = 0;
-      while (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80) offset++;
-      tail = truncateTail(bytes.subarray(offset).toString("utf8"), { maxLines: 100, maxBytes: 16384 }).content;
-    } finally { closeSync(fd); }
-    const data = { ...record, total_bytes: size, output: tail, wall_time_seconds:
-      ((record.finished_at ?? Date.now()) - record.started_at) / 1000 };
+      await abortable(previous, signal);
+      acquired = true;
+      if (signal?.aborted) throw aborted();
+      if (task.error) throw task.error;
+      if (chars && task.exit_code !== undefined) throw new Error("Command session has already exited.");
+      task.updates.add(changed);
+      if (task.bytes > task.cursor) changed();
+      if (task.exit_code === undefined) {
+        // Stream writes stay ordered even when backpressure outlasts this interaction.
+        const written = chars ? task.write(chars) : Promise.resolve();
+        await abortable(Promise.race([
+          task.done,
+          written.then(() => task.done),
+          new Promise<void>(resolve => { timer = setTimeout(resolve, milliseconds); }),
+        ]), signal);
+      }
+      if (signal?.aborted) throw aborted();
+      if (task.error) throw task.error;
+      const output = this.read(task, true);
+      return task.exit_code === undefined ? { ...output, session_id: task.session_id } : { ...output, exit_code: task.exit_code };
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (updateTimer) clearTimeout(updateTimer);
+      task.updates.delete(changed);
+      if (acquired) release();
+      else void previous.then(release);
+    }
+  }
+
+  private read(task: Execution, consume: boolean): Pick<ProcessResult, "output" | "truncated" | "full_output_path"> {
+    const end = task.bytes;
+    const start = Math.max(task.cursor, end - (DEFAULT_MAX_BYTES + 4));
+    const buffer = Buffer.alloc(end - start);
+    const fd = openSync(task.path, "r");
+    try { readSync(fd, buffer, 0, buffer.length, start); } finally { closeSync(fd); }
+    let head = 0;
+    if (start > task.cursor) while (head < buffer.length && (buffer[head] & 0xc0) === 0x80) head++;
+    let tail = buffer.length;
+    if (task.exit_code === undefined && tail > head) {
+      let lead = tail - 1;
+      while (lead > head && (buffer[lead] & 0xc0) === 0x80) lead--;
+      const byte = buffer[lead];
+      const expected = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+      if (tail - lead < expected) tail = lead;
+    }
+    const text = stripVTControlCharacters(buffer.subarray(head, tail).toString("utf8"))
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFF9-\uFFFB]/g, "");
+    const truncated = truncateTail(text);
+    const omitted = start > task.cursor || truncated.truncated;
+    if (consume) task.cursor = start + tail;
     return {
-      content: [{ type: "text", text: `Task ${record.task_id}: ${record.status}; exit_code=${record.exit_code}; ` +
-        `${data.wall_time_seconds.toFixed(1)}s\nLog: ${record.log_path} (${record.total_lines ?? "unknown"} lines, ${size} bytes)\n${tail}` }],
-      details: { ...data, ...(record.status !== "running" ? { task_event_id: eventId(record) } : {}) },
-      structuredContent: data,
-      ...(reportFailure && (record.status !== "exited" || record.exit_code !== 0) ? { isError: true } : {}),
+      output: omitted ? truncated.content + "\n[Output truncated. Full log: " + task.path + "]" : truncated.content,
+      truncated: omitted,
+      ...(omitted ? { full_output_path: task.path } : {}),
     };
   }
 
-  *forSession(owner: string, references: Set<string>): Generator<TaskRecord> {
-    const emitted = new Set<string>();
-    for (const task of this.live.values()) {
-      if (task.handed && (task.record.owner_session_id === owner || references.has(task.record.task_id))) {
-        emitted.add(task.record.task_id);
-        yield { ...task.record };
-      }
-    }
-    for (const file of readdirSync(this.directory)) {
-      if (!file.endsWith(".json") || !taskIdPattern.test(file.slice(0, -5))) continue;
-      const id = file.slice(0, -5);
-      if (emitted.has(id)) continue;
-      const record = this.get(id);
-      if (record.owner_session_id === owner || references.has(id)) yield record;
+  async stop(id: number, access: Access): Promise<void> {
+    const task = this.get(id, access);
+    if (task.exit_code === undefined) { task.kill(); await task.done; }
+  }
+
+  *forSession(access: Access): Generator<ProcessRecord> {
+    for (const task of this.processes.values()) {
+      if (task.owner === access.owner || access.references.has(task.session_id)) yield task;
     }
   }
 
-  async shutdown() {
+  async shutdown(): Promise<void> {
     this.closing = true;
-    const tasks = [...this.live.values()];
-    for (const task of tasks) { task.stopRequested = true; task.controller.abort(); }
-    await Promise.all(tasks.map((task) => task.done));
+    this.onExit();
+    await Promise.all([...this.processes.values()].map(task => task.done));
+    process.off("exit", this.onExit);
   }
 }
 
-const key = Symbol.for("pi-async-bash.managers.v1");
-export function getManager(directory: string): TaskManager {
-  const globals = globalThis as typeof globalThis & { [key]?: Map<string, TaskManager> };
+const key = Symbol.for("pi-async-bash.process-managers.v2");
+export function getManager(directory: string): ProcessManager {
+  const globals = globalThis as typeof globalThis & { [key]?: Map<string, ProcessManager> };
   const managers = globals[key] ??= new Map();
   let manager = managers.get(directory);
-  if (!manager) { manager = new TaskManager(directory); managers.set(directory, manager); }
+  if (!manager) { manager = new ProcessManager(directory); managers.set(directory, manager); }
   return manager;
 }

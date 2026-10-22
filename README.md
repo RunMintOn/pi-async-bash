@@ -1,185 +1,124 @@
 # Async Bash
 
-Long bash commands no longer hold a tool call hostage.
+Codex-style command sessions for Pi: start a command, get its output, then keep waiting or send input to the same process.
 
-> **Beta.** The extension works and is published, but some of its design is still unsettled. Treat it as usable for daily work, not as a stable interface.
->
-> Known design difficulties:
->
-> - **Prompt-cache preservation is still being improved.** Task-state snapshots are currently added temporarily at the end of each model request. This avoids inserting changing state before the conversation history, but the snapshot moves as the conversation grows. Recent context after the previous snapshot may therefore need to be processed again rather than read from cache. We are still exploring a better mechanism; the current approach does not guarantee full cache reuse.
-> - **Completion delivery is scheduled by pi, not by this extension.** A finished task sends one message through pi's steering queue. Delivery happens at a turn boundary the host chooses, and it does not interrupt a running tool batch. In a real session, one completion was observed arriving about 104 minutes late. The extension cannot bound that latency; the most it can do is hand the message over as early as the host allows.
-> - **It depends on host internals.** The handoff reads the local shell backend, and the notification relies on delivery and settle hooks in pi 1.3.0. A pi release that changes those paths can break the extension quietly, without a load error.
-> - **The 63-second threshold is a fixed waiting time, not a configured value.** It is chosen to sit under the default tool timeout and is not adjustable per project.
-> - **It cannot compose another execution backend.** Any other extension that also registers `bash` conflicts with this one; pi picks a definition by load order instead of composing two backends.
-> - **Background state is process-local.** Tasks do not survive quitting pi, are not adopted across processes, and descendants that leave the process group are not tracked.
->
-> Verified on pi 1.3.0, Node 22.23.2 and macOS only. Windows is untested.
+> This working tree replaces the old 63-second background/notification design. The new interface is not published yet. Verified with Pi 1.4.0, Node 22.23.2 and macOS. Linux uses the same Unix implementation but has not been tested; Windows is not supported.
 
-## What installing it changes
-
-One changed behaviour and one new tool:
-
-1. A `bash` call still running after 63 seconds returns a task ID instead of blocking. The command keeps running and the session is notified when it ends.
-2. `bash_task` is added, so the session can check or stop those tasks.
-
-```mermaid
-flowchart TB
-  subgraph before["Before: the tool call owns the wait"]
-    b1["bash({ command, timeout })"] --> b2["pi runs the command"]
-    b2 --> b3["the tool call waits for the exit code"]
-    b3 --> b4["one result: output, exit code, wall time"]
-  end
-  subgraph after["After: the wait can be released once"]
-    a1["bash({ command, timeout })"] --> a2["pi runs the same command"]
-    a2 --> a3{"still running after 63 s?"}
-    a3 -->|"no"| a4["same result as before"]
-    a3 -->|"yes"| a5["result: status running, task_id, log path"]
-    a5 --> a6["the turn continues"]
-    a2 -.->|"same process, never restarted"| a7["command exits"]
-    a7 --> a8["completion message wakes the session that started it"]
-  end
-```
-
-### The bash interface is unchanged
-
-| | |
-|---|---|
-| Tool name | `bash` |
-| Parameters | `command` and `timeout`, same schema and validation. There is no `background` parameter, so the model never guesses how long a command will take |
-| Shell | Same `shellPath`, `shellCommandPrefix`, session environment (`PI_SESSION_ID` and friends) and `tool_call` policies |
-| Foreground | Same native execution code, wrapped only to copy output into a log. Same output text, same truncation to 2000 lines / 50 KB, same exit code and error marking |
-| Timeout | Still an execution limit. A `timeout` of 63 seconds or less never hands off |
-
-Three things about the tool definition do differ:
-
-- The description ends with one sentence that tells the model about the handoff.
-- The declared output schema accepts a normal result or a `running` result.
-- In the TUI, the bash tool no longer supplies a result renderer, so pi's generic renderer draws the result body instead of the built-in bash result widget.
-
-### What gets added
-
-| Addition | Effect |
-|---|---|
-| `bash_task` tool | `status` and `kill` for tasks owned by, or inherited by, the current session |
-| Footer status | TUI only, for example `BG 1 · 2m 10s`, refreshed every second |
-| Completion message | When a handed-off command ends, one message reaches the session that started it and may start a turn |
-| Context note | While tasks exist, a hidden `async-bash-state` message joins model requests, capped at 16 KiB |
-| Session entry | Each handoff appends an `async-bash-task` entry to the branch |
-| Files | `<agent dir>/extension-data/async-bash/` (0700) gets one `.log` per bash call, short calls included, and one `.json` per handed-off task. Nothing is deleted automatically |
-
-Two behaviours change only after a handoff:
-
-- Escape stops the turn, not the background command. Use `bash_task` with `kill`.
-- Quitting pi stops tasks owned by that process.
-
-### What it does not do
-
-- It writes no settings. `pi install` registers the package; the extension reads `shellPath` and `shellCommandPrefix` and changes neither.
-- It touches no project files, starts no daemon and opens no network connection.
-- It makes no model calls of its own. A completion message starts an ordinary turn, using your configured model like any other turn.
-- It does not adopt tasks across processes, and it does not compose another extension's private spawn hook, SSH or sandbox backend.
-
-## Install
+## Try locally
 
 ```bash
-pi install npm:@runminton/pi-async-bash
+npm ci
+pi -e ./index.ts
 ```
 
-Or load it for one invocation without changing your settings:
+This loads the extension for one invocation without changing Pi settings. Do not load another extension that also overrides `bash`.
 
-```bash
-pi -e npm:@runminton/pi-async-bash
-```
+The package depends on `node-pty`. Its install hook restores executable permissions on the Unix spawn helper shipped by node-pty 1.1.0. If installation scripts were disabled, run `npm run postinstall` before trying PTY mode. Native builds may require platform build tools when no compatible prebuilt binary is available.
 
-Installing modifies your pi configuration explicitly through `pi install`. Loading with `-e` does not.
+## Tools
 
-Verified on pi 1.3.0, Node 22.23.2 and macOS. Implementation reuses pi's local shell backend; Windows is untested.
-
-Do not load another extension that overrides `bash` at the same time. pi 1.3.0 reports duplicate tools as a conflict and selects a definition by load order; it does not compose two execution backends. This extension honours the standard `shellPath`, `shellCommandPrefix` and `tool_call` restrictions.
-
-With a version of `pi-compact-tool` that no longer overrides bash execution, async-bash executes and compact renders; both load orders work. Older compact versions still register bash and must be updated together.
-
-## Usage
-
-Normal bash parameters are unchanged:
+### bash
 
 ```typescript
-bash({ command: "npm run e2e", timeout: 600 })
+bash({
+  command: "cd /path/to/project && npm test",
+  yield_time_ms: 10000,       // optional; default 10000, clamped to 250–30000
+  tty: false,                // optional; allocate a PTY when true
+})
 ```
 
-For work whose result you need, run the command in the foreground. Do not wrap it in `nohup ... &` and then wait with `sleep; tail`: the shell returns after launching the process, so this tool cannot track its completion. The tool already handles long commands and keeps their logs.
+Short commands return output and an exit code. Commands still running at the end of the wait return output and a numeric `session_id`. The command is not restarted.
 
-If the command is still running after 63 seconds, the call returns:
+There is no execution timeout. `yield_time_ms` limits only this tool call's wait. The command keeps running until it exits, is explicitly stopped, or Pi exits.
 
-```text
-Still running after 63 seconds. Task: <task_id>
-Log: <absolute_log_path>
-You will be notified when it finishes. Do not poll.
-Continue work that does not depend on this result. If none remains, end your turn and resume when notified.
-```
+Commands start in Pi's current directory. Use `cd … && …` to change directory for a command; it does not change the directory for subsequent tools. There is no `workdir` parameter. Shell selection and command prefixes use Pi's `shellPath` and `shellCommandPrefix` settings; initialization and prefixes run before any `cd` in the command. Session/model environment variables are supplied at launch.
 
-Then, on demand:
+### write_stdin
+
+Continue waiting without sending input:
 
 ```typescript
-bash_task({ task_id: "...", action: "status" })
-bash_task({ task_id: "...", action: "kill" })
+write_stdin({ session_id: 12345, yield_time_ms: 300000 })
 ```
 
-New task IDs are 8 random hexadecimal characters, for example `a3f8c921`, regenerated on collision. Existing UUID tasks remain readable and controllable.
+Or send input:
 
-| Action | Behaviour |
-|---|---|
-| status | Returns the status, log location and a bounded log tail |
-| kill | Stops the managed process group and returns after observing the result; a finished task keeps its original result |
+```typescript
+write_stdin({ session_id: 12345, chars: "yes\n" })
+```
 
-`timeout` is the execution limit for the whole command. A background handoff does not restart it. The 63 seconds are a waiting threshold, not an execution timeout.
+| Input | Default wait | Effective range |
+| --- | --- | --- |
+| Empty or omitted `chars` | 5 seconds | 5–300 seconds |
+| Non-empty `chars` | 250 milliseconds | 250–30000 milliseconds |
 
-`bash_task` no longer supports `wait`, and `bash` gains no synchronous waiting parameter. After a running result, continue work that does not depend on it; when nothing is left, end the turn and resume when notified.
+Completion returns early. A window expiring does not stop the process. Use another `write_stdin` call when you need its result; there is no need to construct shell sleep-and-tail loops.
 
-Completion messages are delivered at the next available turn boundary, even while the agent continues calling tools. They do not interrupt a running tool batch. They use steering delivery rather than a follow-up queue, which would wait for the agent's entire tool loop to stop.
+Calls return only newly collected output. Interactions with the same process are ordered; different processes can run concurrently.
 
-## Footer
+The wait window also covers pipe backpressure. Input remains queued in order if the window expires before the program reads it; returning a running session does not confirm that the program has consumed the input.
 
-In the TUI, current-session background tasks appear through pi's native status API. The footer itself is not replaced and compact is not required:
+### Results
+
+Both tools return the same structured data to codemode:
+
+```typescript
+{ output: "Starting tests...\n", truncated: false, wall_time_seconds: 0.25, session_id: 12345 }
+// Later:
+{ output: "Tests passed.\n", truncated: false, wall_time_seconds: 0.8, exit_code: 0 }
+```
+
+`session_id` means the command is still running. `exit_code` means it has ended. This ID is a command reference, not an OS PID or a Pi conversation ID.
+
+A non-zero exit is marked as a tool error while retaining structured output and the exit code. Reading an already-finished session again returns any unread output and its original exit code.
+
+`truncated` describes only the new output returned by this call. When true, `full_output_path` points to the complete raw log for the entire command, including earlier output. The path is omitted when this call is not truncated.
+
+`wall_time_seconds` is this tool call's elapsed time, including queueing, input backpressure and waiting. It is not the command's total lifetime or the requested wait window.
+
+## PTY and stopping
+
+Use `tty: true` for terminal-dependent programs. PTYs use an 80×24 terminal and support normal terminal input, including Ctrl+C:
+
+```typescript
+write_stdin({ session_id: 12345, chars: "\u0003" })
+```
+
+In pipe mode, that character is ordinary input, not an interrupt signal. To explicitly stop either kind of session, use the user command:
 
 ```text
-BG 2 · 3m 12s / 1m 05s
+/bash-stop 12345
 ```
 
-Each duration counts from when its command actually started, including the foreground 63 seconds. Entries are ordered by start time and refresh every second; IDs are not shown. A finished task is removed immediately, and the status disappears when nothing is running. Foreground commands and `unknown` tasks from an earlier runtime are never counted.
+This stops the managed Unix process group and waits for its exit. It does not promise to stop descendants that deliberately leave that group.
 
-Narrow terminals drop spaces inside durations first, then report omitted entries as `+N`, for example `BG 2 · 3m12s / +1`. The native footer still applies its single-line truncation to all extension statuses.
+When the main command exits, any remaining processes in its managed group are stopped as well. The main command's original exit code is preserved.
 
-Switching sessions only shows tasks the current session owns or inherits by reference. The compact tool row shows `Backgrounded` to record that a handoff happened at that point; the footer shows what is running now, and the completion notification carries the final result.
+- Cancel the initial `bash` call before it returns a reference: the command is stopped.
+- Cancel a later `write_stdin`: only that interaction is cancelled; the command continues and unread output is retained.
+- Stop an already-finished session: its original result is preserved.
 
-## Lifecycle
+## Output and lifecycle
 
-- Before a task ID is returned, Escape cancels the running command.
-- After a task ID is returned, Escape does not stop that task; use kill.
-- `/tree`, session switching, fork/clone and reload do not stop tasks.
-- Completion notifications wake only the owning session. Returning to another branch adds state but does not replay the automatic notification.
-- fork/clone inherits the same task ID without copying the process; an inheriting session can query and stop it explicitly.
-- A normal pi exit stops tasks managed by the current process.
-- After a crash, task survival and cleanup are not promised. A new runtime marks executions it cannot confirm as `unknown`; it does not guess an exit code or adopt or stop anything based on a stale PID.
-- Long-running services usually never exit on their own. A `running` task does not mean a service is ready to accept requests.
+Output is bounded using Pi's default 2000-line / 50-KiB limits. Truncated output includes a full log path in its text. Raw stdout/stderr are saved under `<agent dir>/extension-data/async-bash/`, including short calls. Logs are not automatically deleted.
 
-Automatic handoff releases only that one bash call. When the same batch contains other blocking tools, the current turn may still have to wait.
+The native Footer shows running, handed-off commands for the current session, for example `BG 2 · 12s / 3s`. It does not replace Pi's Footer.
 
-## Output and state
+Sessions survive reload and switching conversations within the same Pi process. A fork that inherits a reference can use the same process; it does not copy it. Unrelated conversations cannot operate on a session just by guessing its ID. Output has one shared read position per process, including inherited references.
 
-Completion notifications and `status` include at most 100 log lines and 16 KiB. Restored context has a separate 16 KiB total budget and does not repeatedly inject full logs.
+Normal Pi exit and handled termination clean up managed processes. A new Pi process cannot resume old command sessions; old references are rejected. SIGKILL/crash cleanup is not guaranteed.
 
-Task-state snapshots are appended after conversation history, preserving the older prefix before the previous snapshot. The transient snapshot moves as the conversation grows, so recent context after its previous position may still lose cache reuse. See the Beta notes above.
+**Completion does not send a message or wake the model.** If the model needs the result, it must continue with `write_stdin`. No task snapshots are injected into model requests.
 
-Statuses are `running`, `exited`, `killed`, `timed_out`, `failed` and `unknown`. A non-zero exit is still `exited`, with the exit code kept separately. Querying a failed task with `status` is not itself a tool error; `kill` on a failing terminal state is marked as an error.
+## Changes from the old design
 
-Inside codemode:
+- Default initial wait is 10 seconds instead of 63.
+- Added `yield_time_ms`, `tty` and `write_stdin`.
+- Removed `timeout`, the experimental `workdir` parameter and `bash_task`; old arguments are rejected rather than silently ignored.
+- Removed completion notifications, automatic turns, moving context snapshots and JSON task-state recovery.
+- Previous log files are left untouched; old task IDs are not migrated.
 
-- Short bash calls return the original structured fields such as `output` and `exit_code`.
-- Long bash calls return `task_id`, `status: "running"`, `log_path` and similar fields, with a null exit code.
-- `bash_task` returns task status and a bounded `output`; scripts should check status and exit code.
-
-There is no automatic log cleanup, PTY, automatic retry, task list or cross-process task adoption. Termination is guaranteed only for the managed process group, excluding daemon descendants that deliberately leave it.
+The current compact-tool renderer can coexist in either load order, but this extension does not promise its old `Backgrounded` styling.
 
 ## Development
 
@@ -189,11 +128,15 @@ npm run check
 npm test
 ```
 
-Tests use a local deterministic provider, real AgentSessions, real CLI/RPC and real child processes. No external model API is called. The suite performs several real 63-second handoffs and usually takes four to five minutes.
+Tests use real AgentSessions, CLI/RPC, Unix child processes and PTYs with a local deterministic provider. No model API is called. The suite includes a real default ten-second handoff.
 
-RPC tests print a temporary artifact directory that keeps each process's `events-<pid>.jsonl`, `stderr-<pid>.log`, session and command logs.
+The plugin owns the interactive pipe/PTY backend because native Bash does not expose a writable stdin or resumable process handle. It reuses Pi's public Shell configuration and truncation helpers, and adapts the native PATH and output-draining behavior without private imports or changes to Pi.
 
-Local implementation notes are in `TICKETS.md`, the acceptance contract in `SPEC.md`, and research evidence in `INVESTIGATION.md`.
+Both tools provide system-prompt snippets and guidelines adapted from Codex, including its advice to avoid blocking sleep/wait calls longer than 60 seconds. This is model guidance, not a hard runtime limit; the maximum empty wait remains 300 seconds. Codemode also receives these guidelines through Pi's normal tool declarations.
+
+RPC tests retain event streams, stderr, sessions and logs in temporary artifact directories printed in their output.
+
+The current contract is in `SPEC.md`; implementation and review records are in `TICKETS.md`. Earlier investigation documents describe historical designs.
 
 ## License
 

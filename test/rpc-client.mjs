@@ -19,7 +19,7 @@ export class TestRpc {
       "--no-skills", "--no-context-files", "--no-prompt-templates",
       "-e", extensionPath, "-e", resolve("test/fixtures/provider.ts"), "-e", "builtin:codemode",
       "--provider", "async-test", "--model", "scripted", "--thinking", "off",
-      "--tools", "bash,bash_task,codemode", "--session-dir", join(dir, "sessions"),
+      "--tools", "bash,write_stdin,codemode", "--session-dir", join(dir, "sessions"),
     ], {
       cwd: dir,
       env: { ...process.env, PI_CODING_AGENT_DIR: join(dir, "agent"), PI_OFFLINE: "1" },

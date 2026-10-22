@@ -1,5 +1,31 @@
 # 本地实施记录
 
+## T10 — 方案 A：接口收紧、原生复用与模型说明
+
+- 状态：已完成。三个本地任务位于 `.scratch/interactive-bash-refinement/issues/`，按用户授权直接串行实施，不派发子代理，不创建远端 issue。
+- 删除并拒绝 workdir；保留普通管道持续 stdin 和可选 PTY。两个工具及 codemode 恢复 truncated、full_output_path、wall_time_seconds；耗时按单次调用计算。
+- 完成原生能力逐项对应；复用 Pi 公开 Shell 配置、截断和原生提示词定义，适配管理命令 PATH 与按活动重置的退出后管道排空，不修改宿主、不导入内部模块。
+- 完成 Codex 原文、版本与位置对应；恢复两个 Snippet 和适用环境指引，加入 60 秒阻塞等待建议，300 秒等待能力上限不变。直接与 codemode-only 的真实请求均已检查。
+- 完整回归 30/30，通过约 39.3 秒：`/tmp/async-refine-final-tests.log`。类型检查：`/tmp/async-refine-final-check.log`。manifest/lock 一致性、差异空白检查通过。
+- 本轮的来源表、工具完整 diff、红灯与产物路径、Standards/Spec 串行 review 见 `.scratch/interactive-bash-refinement/`。
+- 产品代码约 550 行（入口、进程、状态与安装脚本合计）。仅本地确定性 provider；Linux 未实测，未调用真实模型、修改加载配置、push 或发布。原有未跟踪 ARCHITECTURE.md 不包含在提交中。
+
+## T9 — Codex 式命令执行与交互
+
+- 状态：已完成（上一轮，接口随后由 T10 调整）。当前行为以 `SPEC.md` 为准；单个本地任务记录在 `.scratch/codex-exec/issues/01-execution-and-interaction.md`，未创建远端 issue。
+- 保留 bash 名称，输入缩为 command、workdir、yield_time_ms、tty；新增 write_stdin，仅返回 output 与 exit_code/session_id。不保留执行 timeout 或 bash_task。
+- 实现真实管道 stdin、node-pty 终端、Ctrl+C、逐进程串行交互、增量输出、取消等待、显式用户命令 `/bash-stop`、会话引用、reload/fork、Footer 和退出清理。不同进程的工具调用允许并行。
+- 移除自动完成消息、自动唤醒、请求级任务快照和 JSON 任务恢复。旧日志不迁移、不删除；旧通知测试通过 trash 移除，其余测试按新契约替换。
+- 新增 node-pty 1.1.0 运行依赖及 Unix helper 安装权限修正；开发测试依赖固定到本机目标 Pi 1.4.0，host peer 仍由 Pi 提供。
+- 红灯：`/tmp/async-bash-codex-red.log`。目标版本完整回归 23/23，通过约 34 秒：`/tmp/async-bash-codex-final.log`。最后 review 修正后的相关回归 8/8：`/tmp/async-bash-codex-reviewed.log`。类型检查：`/tmp/async-bash-codex-check.log`；`git diff --check` 通过。
+- 真实 RPC、PTY、SIGTERM、退出与新进程拒绝旧引用均已检查。最终 RPC 记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-CL2pMr`；信号清理记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-wPgRnf`。
+- 已打包到临时目录并作为消费者安装，真实 PTY 输出 `PACKAGE_PTY_OK`：`/tmp/pi-async-bash-package-HTIcK9`。未发布。
+- Standards/Spec review 由当前 Agent 串行完成，不使用子代理。没有调用真实模型服务，没有自动加载或修改用户配置，也没有 commit/push。原有未跟踪 `ARCHITECTURE.md` 保持不变。
+
+## 历史实施记录
+
+以下记录描述已被 T9 替代的旧契约及当时的分支、版本和授权。
+
 集成分支：`integration/async-bash`。串行实施，不创建远端 issue 或 PR；初始实现已按用户后续要求提交为 `e16a439`。
 用户已授权直接按本地 spec 实施，测试边界沿用 spec 中的真实会话与 RPC。
 

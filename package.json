@@ -1,7 +1,7 @@
 {
   "name": "@runminton/pi-async-bash",
   "version": "0.1.2",
-  "description": "Automatically hand long-running pi bash commands to a managed background task and resume the session when it finishes.",
+  "description": "Codex-style shell sessions for pi, with bounded waits, stdin and optional PTY.",
   "type": "module",
   "license": "MIT",
   "author": "RunMintOn",
@@ -28,10 +28,12 @@
   "files": [
     "index.ts",
     "src",
+    "scripts/setup-pty.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "postinstall": "node scripts/setup-pty.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "check": "tsc --noEmit"
   },
@@ -40,7 +42,11 @@
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "^22.19.19",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "node-pty": "1.1.0"
   }
 }
