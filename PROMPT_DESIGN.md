@@ -1,6 +1,6 @@
 # 模型可见提示词的设计规则
 
-本文记录 `bash` / `bash_sync` / `bash_task` 提示词的层间分工、已固定的措辞及理由。改提示词前读本文，再读 [四家原文汇编](.scratch/async-bash-research/prompts.md)。当前文本见 [D 稿](.scratch/bash-task-handoff/prompt-d-split.md)，上一版见 [C 稿](.scratch/bash-task-handoff/prompt-c-reviewed.md)，基线见 [A 稿](.scratch/bash-task-handoff/prompt-a-current.md)，初稿见 [B 稿](.scratch/bash-task-handoff/prompt-b-proposed.md)。
+本文记录 `bash` / `bash_sync` / `bash_task` 提示词的层间分工、已固定的措辞及理由。改提示词前读本文，再读 [四家原文汇编](.scratch/async-bash-research/prompts.md)。三个工具的分工见 [D 稿](.scratch/bash-task-handoff/prompt-d-split.md)，上一版见 [C 稿](.scratch/bash-task-handoff/prompt-c-reviewed.md)，基线见 [A 稿](.scratch/bash-task-handoff/prompt-a-current.md)，初稿见 [B 稿](.scratch/bash-task-handoff/prompt-b-proposed.md)。
 
 ## 1. 四层的可见性
 
@@ -16,6 +16,8 @@ Pi 文档按此顺序使用这四层，见 `node_modules/@earendil-works/pi-codi
 `model-only` 的 `bash` 和 `bash_task` 走上面四层。默认情况下，`bash_sync` 的描述、参数和返回类型由 codemode 提供。它的调用契约写在工具描述里。
 
 `codemode` 的 `on` 和 `only` 模式都保留 `bash` 和 `bash_task` 的直接声明。`only` 会隐藏可从脚本调用的 `direct` 工具的直接声明，并把工具契约放进 codemode 描述。`test/instructions.test.mjs` 捕获未启用 codemode、`on` 和 `only` 三种请求。
+
+`bash` 的描述区分一次性模式和常驻会话。`pi -p` 和 `--mode json` 前台等待命令结束。交互式和 RPC 会话在 30 秒后交接仍在执行的命令。接续规则由交接回执触发。
 
 ## 2. 两条写作原则
 
@@ -40,6 +42,8 @@ Pi 文档按此顺序使用这四层，见 `node_modules/@earendil-works/pi-codi
 | `bash` 的规则给出 `tools.bash_sync` | 在模型编写脚本时提供可直接使用的调用名 |
 | `bash_sync` 的描述写 worker 占用 | 脚本等待命令期间会占用一个 worker。可独立运行的长命令可以用 `bash` 交接 |
 | `bash_sync` 的参数沿用原生文本 | 原生「Timeout in seconds (optional, no default timeout)」在同步调用上是准确的。`bash` 那份才需要写「包括交接后」 |
+| 结果标题直接写全文、截断或运行中 | `Complete output (2 lines)` / `Output truncated (showing line 3)` / `Output so far (1 line)` 把「还需不需要读日志」这个判断放在标题里。旧写法 `Showing lines 1–37` 只能靠有无 `(preview truncated)` 反推，模型会为确认再查一次日志。日志故障时 `Incomplete output` 优先于运行中 |
+| `bash` 的描述按模式写两组时点 | `print` / `json` 前台等待，`tui` / `rpc` 30 秒交接。不写就会让一次性会话的模型以为「结果会自动回来」，而那个进程回答完就退出了 |
 
 ## 4. 同步阻塞：用工具分工实现，不用参数
 
@@ -53,8 +57,8 @@ Pi 文档按此顺序使用这四层，见 `node_modules/@earendil-works/pi-codi
 
 ## 5. 验证方法
 
-1. `npm run check` 与 `npm test`。20 项约 75 秒，含真实 RPC 用户旅程与 OpenAI 适配器请求前缀回归。
-2. 用 `test/instructions.test.mjs` 输出的 `tool-instructions.json` 核对真实请求。测试检查直接调用的规则和工具声明，以及启用 codemode 时脚本侧的工具描述。当前文字与 [D 稿](.scratch/bash-task-handoff/prompt-d-split.md) 核对。
+1. `npm run check` 与 `npm test`。包含真实 RPC 用户旅程、一次性 CLI 模式和 OpenAI 适配器请求前缀回归。
+2. 用 `test/instructions.test.mjs` 输出的 `tool-instructions.json` 核对真实请求。测试检查直接调用的规则和工具声明，以及启用 codemode 时脚本侧的工具描述。
 3. 改提示词后必跑 `test/cache-prefix.test.mjs`：任务事件期间已有消息、系统提示和工具声明必须保持不变。
 
 边界：真实模型的遵循程度未验证，只做过隔离场景抽查；Linux 未实测。`npm test` 的缓存断言只看 OpenAI 适配器序列化后的请求。

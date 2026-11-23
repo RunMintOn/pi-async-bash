@@ -1,5 +1,15 @@
 # 本地实施记录
 
+## T13 — 一次性模式前台执行与预览标题
+
+- 已实现。`bash` 在 `ctx.mode` 为 `print` / `json` 时直接用原生 `createBashToolDefinition` 跑到结束，不建任务、不交接。`tui` 与 `rpc` 维持 30 秒交接。契约见 [SPEC.md](SPEC.md) 第一张表，提示词分层见 [PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 1 节。
+- **为什么 print/json 不交接。** 这两种模式在回答完就退出，`session_shutdown` 会终止受管任务并删除日志，交接结果无人接收。dogfooding 实测：`pi -p` 跑 `npm test` 在 30 秒交接，模型答一句后进程退出，测试随之中断；同一流程在常驻 RPC 会话首轮结束后自动唤醒，退出码 `0`、20 项通过。进程退出时机由宿主决定，扩展改不了，所以选择在前台等。
+- **为什么用 `ctx.mode` 而不是让模型判断。** 交接的价值是释放当前轮次，一次性模式没有后续轮次可接。分支放在工具执行层，模型看到的描述已按模式写明，不需要新增参数或规则。
+- **预览标题。** `formatTask` 的标题改为自描述：`Complete output (2 lines)`、`Output truncated (showing line 3)`、`Output so far (1 line)`、日志故障时 `Incomplete output`。原先 `Showing lines 1–37` 要靠有无 `(preview truncated)` 反推是否全文，模型会为确认再读一遍日志。
+- **接受的代价。** 超长行不是最后一行时，该行整体不进预览（只保留完整行）。用户已明确选此方案，理由是预览可读性优先，完整日志随时可查。落到 `truncated: true` 和 `showing line N` 上，模型能知道省略了一行并去看日志。改成保留后缀会破坏「优先完整行」这条已定规则。
+- **未改。** 三个工具的分工、`bash_sync` 输出上限、工具选择规则均不变。`bash_sync` 返回 100 KB 且 `truncated: false` 复核为设计如此，不是缺陷。
+- 验收：`npm run check` 通过。新增 `test/one-shot.test.mjs`（`-p` 与 `--mode json` 各跑一条 31 秒命令，断言拿到末尾输出和退出码 7），`test/rpc.test.mjs` 增加标题断言和超大中间行场景，`test/cache-prefix.test.mjs` 显式以 `rpc` 模式运行。分区回归通过（cache-prefix 30.2s、one-shot 31.3s、rpc 39.3s）；修正测试后未重跑完整套件。
+
 ## T12 — 三个工具按 exposure 分工
 
 - 已实现。`bash` 与 `bash_task` 为 `model-only`，新增 `bash_sync` 为 `codemode`。规格与提示词见 [SPEC.md](SPEC.md)、[D 稿](.scratch/bash-task-handoff/prompt-d-split.md)、[PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 4 节。

@@ -38,14 +38,17 @@
 - **`bash_sync` 的 `timeout` 会真的杀进程。** 原生 `createBashToolDefinition` 的 `timeout` 语义是命令行寿命，脚本里超时会中断命令，不是只中断等待。
 - **结构化输出与文本输出上限不同。** 文本按 2000 行 / 50 KiB 截断，脚本拿到的 `output` 上限 1 MiB，`truncated` 与 `full_output_path` 只在结构化输出侧有意义。
 - **直接复用 `createBashToolDefinition` 要自己传 `shellPath` 和 `commandPrefix`。** 不传就退回默认 shell，和 `bash` 的行为不一致。需要 tee 日志时再包 `operations.exec`，见 `index.ts` 的 `bash` 分支。
+- **`harness()` 默认把扩展模式当成 `print`。** Pi SDK 的 `createAgentSessionRuntime` 和 `runner.setUIContext` 默认 `mode: "print"`，不在 `bindExtensions` 里传 `mode` 就一直是 `print`。后果：任何按 `ctx.mode` 分支的行为（例如 `bash` 的一次性执行路径）在 harness 测试里都走一次性那支。2026-11 就因此让 `test/cache-prefix.test.mjs` 假装常驻会话时拿不到交接，任务永不完成、测试 55 秒超时。**要模拟交互式或 RPC 会话，传 `binding: { mode: "rpc" }` 给 `harness()` 的第三个参数。**
+- **子进程形式的 Pi 必须先关 stdin。** `pi -p` 与 `--mode json` 在 `stdin` 不是 TTY 时会先读完管道再启动（`resolveAppMode` 与 `readPipedStdin`）。用 `execFile` 起子进程却不写也不关 `child.stdin`，Pi 会卡在启动阶段直到外层超时。写完后 `run.child.stdin.end()`。RPC 模式例外，它把 stdin 当协议通道。
 
 ## 5. 验证手法
 
-`test/support.mjs` 的 `harness()` 两个参数直接决定可见性验证：
+`harness()` 两个参数决定可见性验证，第三个参数决定运行模式：
 
 ```js
 harness(settings, extensionFactories, {
   tools: ["+codemode"],              // 可用修饰写法，绕过注册白名单
+  binding: { mode: "rpc" },          // 不传就是 print，按 ctx.mode 分支的工具会走一次性路径
   calls(context) { /* 捕获真实请求 */ },
 });
 ```

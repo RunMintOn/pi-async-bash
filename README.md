@@ -17,7 +17,9 @@ pi -e ./index.ts
 bash({ command: "npm test", timeout: 120 })
 ```
 
-`timeout` 沿用原生 Bash 的执行超时，单位为秒。省略时命令没有执行超时。30 秒内结束，直接拿到原生 Bash 的结果。仍在运行时，收到 `status: "running"`、`task_id` 和 `log_path`。原进程继续，执行超时也继续计时。
+`timeout` 沿用原生 Bash 的执行超时，单位为秒。省略时命令没有执行超时。在交互式和 RPC 会话里，30 秒内结束就直接拿到原生 Bash 的结果。仍在运行时，收到 `status: "running"`、`task_id` 和 `log_path`。原进程继续，执行超时也继续计时。
+
+`pi -p` 和 `pi --mode json` 会在回答后退出。这两个模式下，`bash` 在前台等到命令完成、超时或取消，再交回结果。
 
 ```typescript
 bash_task({ task_id: "...", wait_seconds: 5 })
@@ -26,7 +28,7 @@ bash_task({ task_id: "...", wait_seconds: 0 })
 
 `bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。
 
-每次查看返回状态和日志末尾，最多 40 行、4 KiB。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。用 `read` 的 `offset` 可以定位更早的内容。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
+每次查看返回状态和日志末尾，最多 40 行、4 KiB。查看结果和完成通知会标明输出范围。有截断时，可以用日志路径和 `read` 的 `offset` 查看更早的内容。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
 
 ## 脚本里的执行
 
@@ -53,6 +55,7 @@ return result.output;
 
 ## 已知边界
 
+- `pi -p` 和 `--mode json` 不交接，因此没有 `task_id`、`/bash-stop`、状态栏和完成通知。这些模式回答完就退出，宿主会终止受管任务，交接结果无人接收。
 - 在 Pi 1.6.0 中，`--tools` 使用普通名称列表时会过滤扩展工具的注册。显式列入 `bash_sync` 会同时把它声明给模型。使用 `--tools +codemode` 可保留默认分工。
 - 本扩展按混合模式设计，即 codemode 的 `on`。`only` 模式下 `bash` 和 `bash_task` 仍然直接声明给模型，因为 `only` 只隐藏 `direct` exposure 的工具。
 
@@ -63,7 +66,7 @@ npm run check
 npm test
 ```
 
-测试使用 Pi 1.6.0、真实 Shell 和离线模型。RPC 测试保留事件记录，缓存回归保留 OpenAI 适配器生成的请求。测试输出会打印临时目录。
+测试使用 Pi 1.6.0、真实 Shell 和离线模型。RPC 测试保留事件记录，缓存回归保留 OpenAI 适配器生成的请求，`test/one-shot.test.mjs` 用真实 CLI 跑 `-p` 与 `--mode json`。测试输出会打印临时目录。
 
 - 改工具契约时读 [SPEC.md](SPEC.md)。改完成投递、提示词或日志时，先读 [T11 的维护要点](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md#维护要点)。
 - 改工具描述、`promptSnippet` 或 `promptGuidelines` 时读 [模型可见提示词的设计规则](PROMPT_DESIGN.md)，其中记录了分层和已固定措辞的理由。

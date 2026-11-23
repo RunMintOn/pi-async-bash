@@ -22,10 +22,16 @@ function formatTask(task: TaskResult) {
   const status = task.status === "exited" ? `exited with code ${task.exit_code}` :
     task.status === "timed_out" ? "timed out" : task.status;
   const log = `${task.log_error ? "Incomplete log" : "Log"}: ${task.log_path}`;
-  const lines = task.start_line === undefined ? undefined :
-    task.partial_line ? `Showing the end of line ${task.end_line}` :
-      `Showing lines ${task.start_line}–${task.end_line}`;
-  const heading = lines && (lines + (task.truncated ? " (preview truncated)" : ""));
+  const running = task.status === "running";
+  const scope = task.log_error ? "Incomplete output" : running ? "Output so far" :
+    task.truncated ? "Output truncated" : "Complete output";
+  const lines = task.start_line === undefined ? "0 lines" :
+    task.partial_line ? `showing the end of line ${task.end_line}` :
+    task.truncated ? (task.start_line === task.end_line ? `showing line ${task.start_line}` :
+      `showing lines ${task.start_line}–${task.end_line}`) :
+    task.end_line === 1 ? "1 line" : `${task.end_line} lines`;
+  const preview = task.truncated && (running || task.log_error) ? ", preview truncated" : "";
+  const heading = `${scope} (${lines}${preview})`;
   return [`Bash task ${task.task_id}: ${status}.`, log, task.error, task.log_error, heading, task.output_tail]
     .filter(Boolean).join("\n");
 }
@@ -66,7 +72,7 @@ export default function asyncBash(pi: ExtensionAPI) {
     ...native,
     exposure: "model-only",
     parameters,
-    description: `Run a Bash command in the current working directory. If it finishes before handoff, return its stdout and stderr. The text result keeps at most the last 2,000 lines or 50 KiB, whichever limit is reached first. If truncated, the full output is saved to a temporary file. If the command is still running after ${handoffMs / 1000} seconds, hand it off and return status: running, task_id, and log_path. The same command keeps running, and Pi delivers its final result to the original conversation automatically.`,
+    description: `Run a Bash command in the current working directory and return its stdout and stderr. The text result keeps at most the last 2,000 lines or 50 KiB, whichever limit is reached first. If truncated, the full output is saved to a temporary file. In one-shot print and JSON modes, wait for the command to finish. In interactive and RPC sessions, if the command is still running after ${handoffMs / 1000} seconds, hand it off and return status: running, task_id, and log_path. The same command keeps running, and Pi delivers its final result to the original conversation automatically.`,
     promptSnippet: "Run Bash commands with background handoff for long-running commands",
     promptGuidelines: [
       ...(native.promptGuidelines ?? []),
@@ -80,13 +86,16 @@ export default function asyncBash(pi: ExtensionAPI) {
     },
     async execute(id, input, signal, update, ctx) {
       const settings = pi.getSettings();
+      const shellOptions = { shellPath: settings.shellPath, commandPrefix: settings.shellCommandPrefix };
+      if (ctx.mode === "print" || ctx.mode === "json") {
+        return createBashToolDefinition(ctx.cwd, shellOptions).execute(id, input, signal, update, ctx);
+      }
       const local = createLocalBashOperations({ shellPath: settings.shellPath });
       let foreground = true;
       try {
         const result = await manager.execute(ctx.sessionManager.getSessionId(), signal, execution =>
           createBashToolDefinition(ctx.cwd, {
-            shellPath: settings.shellPath,
-            commandPrefix: settings.shellCommandPrefix,
+            ...shellOptions,
             operations: {
               async exec(command, cwd, options) {
                 execution.start(options.timeout);

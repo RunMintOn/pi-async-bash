@@ -16,8 +16,9 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     const specs = ["waited", "nested", "cancelled", "switched", "stopped", "quit", "timeout"].map(name => {
       const gate = join(rpc.dir, name);
       const pid = gate + ".pid";
+      const longLine = name === "nested" ? "printf 'LONG_DIAGNOSTIC%5000s\\n' '' >&2; " : "";
       const command = `echo $$ > ${quote(pid)}; printf '${name}:start\\n'; ` +
-        `while [ ! -f ${quote(gate)} ]; do sleep 0.05; done; printf '${name}:fail' >&2; exit 7`;
+        `while [ ! -f ${quote(gate)} ]; do sleep 0.05; done; ${longLine}printf '${name}:fail' >&2; exit 7`;
       return { name, gate, pid, command };
     });
     const starts = await rpc.prompt("CALL " + JSON.stringify(specs.map(({ name, command }) => ({
@@ -37,6 +38,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     const snapshot = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 0.02 });
     assert.equal(snapshot.details.status, "running");
     assert.equal(snapshot.details.output_tail, "waited:start\n");
+    assert.match(textOf(snapshot), /^Output so far \(1 line\)$/m);
     assert.doesNotMatch(textOf(snapshot), /end your turn/);
     const oversized = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 301 });
     assert.equal(oversized.isError, true);
@@ -57,6 +59,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     assert.equal(final.isError, true);
     assert.equal(final.details.exit_code, 7);
     assert.equal(final.details.output_tail, "waited:start\nwaited:fail");
+    assert.match(textOf(final), /^Complete output \(2 lines\)$/m);
     assert.equal(readFileSync(refs.waited.log_path, "utf8"), final.details.output_tail);
     assert.equal(completions((await rpc.send("get_messages")).messages).length, 0);
 
@@ -86,7 +89,11 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     assert.match(synced, /"output":"SYNC_OK"/);
     assert.match(synced, /"exit_code":3/);
     const nestedDelivery = await delivered;
-    assert.equal((nestedDelivery.entry ?? nestedDelivery.message).details.exit_code, 7);
+    const nestedResult = nestedDelivery.entry ?? nestedDelivery.message;
+    assert.equal(nestedResult.details.exit_code, 7);
+    assert.equal(nestedResult.details.output_tail, "nested:fail");
+    assert.match(textOf(nestedResult), /^Output truncated \(showing line 3\)$/m);
+    assert.match(readFileSync(refs.nested.log_path, "utf8"), /LONG_DIAGNOSTIC/);
     assert.match((await rpc.send("get_last_assistant_text")).text, /nested:fail/);
 
     await rpc.send("new_session");

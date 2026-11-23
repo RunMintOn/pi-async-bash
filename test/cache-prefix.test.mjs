@@ -25,7 +25,10 @@ async function wireRequest(context) {
 
 test("idle wake and busy completion preserve the OpenAI adapter's serialized prompt prefix and tools", { timeout: 55000 }, async (t) => {
   const contexts = [];
-  const h = await harness({}, [], { calls(context) { contexts.push(structuredClone(context)); } });
+  const h = await harness({}, [], {
+    binding: { mode: "rpc" },
+    calls(context) { contexts.push(structuredClone(context)); },
+  });
   try {
     await h.runtime.session.prompt("BASELINE");
     const idleGate = join(h.dir, "idle");
