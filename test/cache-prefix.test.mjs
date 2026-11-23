@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { assertProcessResult, harness, quote, delay, textOf } from "./support.mjs";
+import { harness, quote, delay, eventOnce, textOf } from "./support.mjs";
 import { stream } from "@earendil-works/pi-ai/api/openai-completions";
 
-async function wireMessages(context) {
+async function wireRequest(context) {
   const model = {
     api: "openai-completions", provider: "offline", id: "prefix-check", name: "Offline prefix check",
     baseUrl: "http://127.0.0.1:1/v1", reasoning: false, input: ["text"],
@@ -20,33 +20,49 @@ async function wireMessages(context) {
         { headers: { "Content-Type": "text/event-stream" } });
     },
   }).result();
-  return payload.messages;
+  return payload;
 }
 
-test("completion never wakes the model or adds snapshots, and later requests retain the sent history prefix", { timeout: 15000 }, async (t) => {
+test("idle wake and busy completion preserve the OpenAI adapter's serialized prompt prefix and tools", { timeout: 55000 }, async (t) => {
   const contexts = [];
   const h = await harness({}, [], { calls(context) { contexts.push(structuredClone(context)); } });
   try {
     await h.runtime.session.prompt("BASELINE");
-    const gate = join(h.dir, "release");
-    const first = await h.call("start silent completion", {
-      command: `printf EARLY; while [ ! -f ${quote(gate)} ]; do sleep 0.02; done; printf LATE; exit 9`,
-      yield_time_ms: 250,
-    });
-    const count = h.requests.length;
-    writeFileSync(gate, "");
-    await delay(300);
-    assert.equal(h.requests.length, count, "process completion started a model request");
-    assert(!h.runtime.session.messages.some(message => message.role === "custom"), "completion injected custom context");
-    await h.runtime.session.prompt("AFTER_COMPLETION");
-    const result = await h.call("read completion", { session_id: first.details.session_id }, "write_stdin");
-    assertProcessResult(result.details, { output: "LATE", exit_code: 9 });
-    assert(!contexts.some(context => context.messages.some(message =>
-      /async-bash-state|Background bash task finished|Task .*log=/.test(textOf(message)))));
-    const requests = await Promise.all(contexts.map(wireMessages));
+    const idleGate = join(h.dir, "idle");
+    const busyGate = join(h.dir, "busy");
+    const blockGate = join(h.dir, "block");
+    const gated = (gate, out) => `while [ ! -f ${quote(gate)} ]; do sleep 0.02; done; printf ${out}`;
+    h.commands.set("START_BOTH", [idleGate, busyGate].map((gate, i) => ({
+      name: "bash", args: { command: gated(gate, i === 0 ? "IDLE_DONE" : "BUSY_DONE") },
+    })));
+    await h.runtime.session.prompt("START_BOTH");
+    const session = h.runtime.session;
+    const idleSettled = eventOnce(session, event => event.type === "agent_settled");
+    writeFileSync(idleGate, "");
+    await idleSettled;
+    assert.match(textOf(session.messages.at(-1)), /IDLE_DONE/);
+
+    h.commands.set("KEEP_AGENT_BUSY", { command: `printf BLOCK_STARTED; ${gated(blockGate, "BLOCK_DONE")}` });
+    const blockStarted = eventOnce(session, event =>
+      event.type === "tool_execution_update" && textOf(event.partialResult).includes("BLOCK_STARTED"));
+    const inProgress = session.prompt("KEEP_AGENT_BUSY");
+    await blockStarted;
+    const before = contexts.length;
+    writeFileSync(busyGate, "");
+    await delay(120);
+    assert.equal(contexts.length, before, "completion interrupted a busy tool");
+    writeFileSync(blockGate, "");
+    await inProgress;
+    assert.match(textOf(session.messages.at(-1)), /BUSY_DONE/);
+    const completions = session.messages.filter(m => m.role === "custom" && m.customType === "async-bash-completion");
+    assert.equal(completions.length, 2);
+
+    const requests = await Promise.all(contexts.map(wireRequest));
     for (let i = 1; i < requests.length; i++) {
-      assert.deepEqual(requests[i].slice(0, requests[i - 1].length), requests[i - 1],
+      const previous = requests[i - 1];
+      assert.deepEqual(requests[i].messages.slice(0, previous.messages.length), previous.messages,
         "a later request rewrote existing provider history");
+      assert.deepEqual(requests[i].tools, previous.tools, "task status changed the serialized tool definitions");
     }
     const artifact = join(h.dir, "prefix-requests.json");
     writeFileSync(artifact, JSON.stringify(requests, null, 2));

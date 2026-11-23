@@ -1,5 +1,4 @@
 import { mkdtempSync } from "node:fs";
-import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,11 +13,6 @@ export const lastConversationMessage = (context) => context.messages.at(-1);
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const quote = text => "'" + text.replaceAll("'", "'\\''") + "'";
 export const node = script => `${quote(process.execPath)} -e ${quote(script)}`;
-export function assertProcessResult(actual, expected) {
-  const { wall_time_seconds, ...data } = actual;
-  assert(Number.isFinite(wall_time_seconds) && wall_time_seconds >= 0, "missing or invalid call duration");
-  assert.deepEqual(data, { truncated: false, ...expected });
-}
 export function eventOnce(session, predicate, timeout = 45000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { off(); reject(new Error("Session event deadline")); }, timeout);
@@ -83,7 +77,7 @@ export async function harness(settings = {}, extensionFactories = [], options = 
     const services = { cwd: dir, agentDir: join(dir, "agent"), settingsManager, resourceLoader, modelRuntime, diagnostics: [] };
     const result = await pi.createAgentSessionFromServices({
       services, sessionManager, sessionStartEvent, model, thinkingLevel: "off",
-      tools: options.tools ?? ["bash", "write_stdin"],
+      tools: options.tools ?? ["bash", "bash_task"],
     });
     return { ...result, services, diagnostics: [] };
   }

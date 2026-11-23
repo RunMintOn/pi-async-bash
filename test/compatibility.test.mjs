@@ -19,8 +19,8 @@ for (const paths of [[extensionPath, compactPath], [compactPath, extensionPath]]
         binding: { mode: "tui", uiContext: { theme, notify() {}, setStatus() {} } },
       });
       try {
-        const first = await h.call("render a session", { command: "printf RENDER_READY; sleep 100", yield_time_ms: 250 });
-        assert.equal(typeof first.details.session_id, "number");
+        const first = await h.call("render a command", { command: "printf RENDER_READY" });
+        const content = structuredClone(first.content);
         const definition = h.runtime.session.getToolDefinition("bash");
         const row = new pi.ToolExecutionComponent("bash", "render-row", { command: "long command" },
           {}, definition, { requestRender() {} }, h.dir);
@@ -32,8 +32,7 @@ for (const paths of [[extensionPath, compactPath], [compactPath, extensionPath]]
           assert(row.render(100).length > 0);
           row.setExpanded(false);
         }
-        assert.equal(typeof first.details.session_id, "number", "rendering changed the result");
-        await h.runtime.session.prompt("/bash-stop " + first.details.session_id);
+        assert.deepEqual(first.content, content, "rendering changed the result");
       } finally { await h.close(); }
     });
 }

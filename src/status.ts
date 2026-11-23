@@ -1,17 +1,5 @@
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { ProcessManager, ProcessRecord } from "./tasks.ts";
-
-export function taskReferences(entries: readonly SessionEntry[]): Set<number> {
-  const ids = new Set<number>();
-  for (const entry of entries) {
-    const value = entry.type === "custom" && entry.customType === "async-bash-process" ? entry.data :
-      entry.type === "message" && entry.message.role === "toolResult" &&
-        (entry.message.toolName === "bash" || entry.message.toolName === "write_stdin") ? entry.message.details : undefined;
-    const id = value && typeof value === "object" && "session_id" in value ? value.session_id : undefined;
-    if (typeof id === "number") ids.add(id);
-  }
-  return ids;
-}
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { TaskManager } from "./tasks.ts";
 
 function duration(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -21,7 +9,7 @@ function duration(milliseconds: number): string {
   return Math.floor(minutes / 60) + "h " + String(minutes % 60).padStart(2, "0") + "m " + String(seconds % 60).padStart(2, "0") + "s";
 }
 
-function backgroundStatus(tasks: readonly ProcessRecord[], now: number, width: number): string | undefined {
+function backgroundStatus(tasks: readonly { started_at: number }[], now: number, width: number): string | undefined {
   if (!tasks.length) return undefined;
   const ages = [...tasks].sort((a, b) => a.started_at - b.started_at).map(task => duration(now - task.started_at));
   const variants = [ages, ages.map(age => age.replaceAll(" ", ""))];
@@ -36,10 +24,10 @@ function backgroundStatus(tasks: readonly ProcessRecord[], now: number, width: n
   return compact.length <= width ? compact : prefix;
 }
 
-export function installTaskStatus(pi: ExtensionAPI, ctx: ExtensionContext, manager: ProcessManager): () => void {
+export function installTaskStatus(ctx: ExtensionContext, manager: TaskManager): () => void {
   if (ctx.mode !== "tui" || !ctx.hasUI) return () => {};
   const owner = ctx.sessionManager.getSessionId();
-  let tasks: ProcessRecord[] = [];
+  let tasks: ReturnType<TaskManager["running"]> = [];
   let timer: ReturnType<typeof setInterval> | undefined;
   let last: string | undefined;
   const update = () => {
@@ -49,20 +37,14 @@ export function installTaskStatus(pi: ExtensionAPI, ctx: ExtensionContext, manag
     if (!tasks.length && timer) { clearInterval(timer); timer = undefined; }
   };
   const refresh = () => {
-    tasks = [...manager.forSession({ owner, references: taskReferences(ctx.sessionManager.getBranch()) })]
-      .filter(task => task.handed && task.exit_code === undefined);
+    tasks = manager.running(owner);
     update();
   };
-  const off = [
-    pi.on("tool_execution_end", event => { if (event.toolName === "bash" || event.toolName === "write_stdin") refresh(); }),
-    pi.on("session_tree", refresh),
-    pi.on("session_compact", refresh),
-    manager.subscribe(refresh),
-  ];
+  const off = manager.subscribe(refresh);
   process.stdout.on("resize", update);
   refresh();
   return () => {
-    for (const unsubscribe of off) unsubscribe();
+    off();
     process.stdout.off("resize", update);
     if (timer) clearInterval(timer);
     ctx.ui.setStatus("async-bash", undefined);

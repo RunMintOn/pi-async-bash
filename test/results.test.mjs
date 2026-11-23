@@ -1,47 +1,94 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
-import { harness, node } from "./support.mjs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { TaskManager } from "../src/tasks.ts";
 
-test("both tools expose per-read truncation and the full raw log, not historical truncation", { timeout: 15000 }, async () => {
-  const h = await harness();
+async function preview(output) {
+  const tasks = new TaskManager(5);
+  const gate = Promise.withResolvers();
   try {
-    const first = await h.call("line truncation", {
-      command: "exec " + node(`
-        process.stdout.write("LINE\\n".repeat(2500));
-        process.stdin.on("data", data => {
-          if (data.toString() === "large") process.stdout.write("中".repeat(50000) + "\\nTAIL\\n");
-          else { process.stdout.write("DONE\\n"); process.exit(7); }
-        });
-      `),
-      yield_time_ms: 250,
+    const ref = await tasks.execute("owner", undefined, async ({ start, log, exited }) => {
+      start();
+      await gate.promise;
+      log(Buffer.from(output));
+      exited(0);
     });
-    assert.equal(first.details.truncated, true);
-    assert.equal(readFileSync(first.details.full_output_path, "utf8"), "LINE\n".repeat(2500));
-    assert(first.details.output.includes(first.details.full_output_path));
+    gate.resolve();
+    const final = await tasks.wait("owner", ref.task_id, 1);
+    assert.equal(fs.readFileSync(ref.log_path, "utf8"), output);
+    return final;
+  } finally { await tasks.shutdown(); }
+}
 
-    const large = await h.call("byte truncation", {
-      session_id: first.details.session_id, chars: "large", yield_time_ms: 500,
-    }, "write_stdin");
-    assert.equal(large.details.truncated, true);
-    assert.equal(large.details.full_output_path, first.details.full_output_path);
-    assert(!large.details.output.includes("\uFFFD"));
-    assert.match(large.details.output, /TAIL/);
-    assert.equal(readFileSync(large.details.full_output_path, "utf8"),
-      "LINE\n".repeat(2500) + "中".repeat(50000) + "\nTAIL\n");
+test("preview reports original line numbers, including a final line without a newline", async () => {
+  const output = Array.from({ length: 42 }, (_, i) => `line ${i + 1}\n`).join("") + "last line";
+  const data = await preview(output);
+  assert.equal(data.output_tail, output.split("\n").slice(3).join("\n"));
+  assert.equal(data.start_line, 4);
+  assert.equal(data.end_line, 43);
+  assert.equal(data.truncated, true);
+});
 
-    const final = await h.call("untruncated finish", {
-      session_id: first.details.session_id, chars: "finish",
-    }, "write_stdin");
-    const { wall_time_seconds, ...data } = final.details;
-    assert.deepEqual(data, { output: "DONE\n", truncated: false, exit_code: 7 });
-    assert.equal(final.isError, true);
-    for (const result of [first, large, final]) {
-      assert(Number.isFinite(result.details.wall_time_seconds) && result.details.wall_time_seconds >= 0);
-    }
-    const again = await h.call("empty finished read", { session_id: first.details.session_id }, "write_stdin");
-    assert.equal(again.details.output, "");
-    assert.equal(again.details.truncated, false);
-    assert.equal(again.details.full_output_path, undefined);
-  } finally { await h.close(); }
+test("the byte limit keeps whole lines if possible and keeps a UTF-8 suffix of an oversized last line", async () => {
+  const whole = await preview("x".repeat(4095) + "\n" + "last\n");
+  assert.equal(whole.output_tail, "last\n");
+  assert.equal(whole.start_line, 2);
+  assert.equal(whole.end_line, 2);
+  assert.equal(whole.truncated, true);
+  assert.equal(whole.partial_line, undefined);
+  const partial = await preview("heading\n" + "中".repeat(2000));
+  assert.equal(partial.output_tail, "中".repeat(1365));
+  assert.equal(partial.start_line, 2);
+  assert.equal(partial.end_line, 2);
+  assert.equal(partial.partial_line, true);
+  assert.equal(partial.truncated, true);
+});
+
+test("empty and exact-limit logs have no truncation", async () => {
+  const empty = await preview("");
+  assert.equal(empty.output_tail, "");
+  assert.equal(empty.start_line, undefined);
+  assert.equal(empty.truncated, false);
+  const output = "a".repeat(4095) + "\n";
+  const exact = await preview(output);
+  assert.equal(exact.output_tail, output);
+  assert.equal(exact.start_line, 1);
+  assert.equal(exact.end_line, 1);
+  assert.equal(exact.truncated, false);
+});
+
+test("a log write failure is delivered as a failed task with an incomplete log", async t => {
+  const tasks = new TaskManager(5);
+  const gate = Promise.withResolvers();
+  const createStream = fs.createWriteStream;
+  t.mock.method(fs, "createWriteStream", (path, options) => createStream(path, {
+    ...options,
+    fs: {
+      close: fs.close,
+      write(fd, data, offset, length, position, cb) {
+        if (data.toString() === "cannot write") return queueMicrotask(() => cb(new Error("disk full")));
+        return fs.write(fd, data, offset, length, position, cb);
+      },
+    },
+  }));
+  syncBuiltinESMExports();
+  try {
+    const ref = await tasks.execute("owner", undefined, async ({ start, log }) => {
+      start();
+      log(Buffer.from("early\n"));
+      await gate.promise;
+      log(Buffer.from("cannot write"));
+    });
+    gate.resolve();
+    const result = await tasks.wait("owner", ref.task_id, 1);
+    assert.equal(result.status, "failed");
+    assert.match(result.log_error, /disk full/);
+    assert.equal(result.output_tail, "early\n");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    gate.resolve();
+    await tasks.shutdown();
+  }
 });

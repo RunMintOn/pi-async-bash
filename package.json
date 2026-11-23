@@ -1,7 +1,7 @@
 {
   "name": "@runminton/pi-async-bash",
   "version": "0.1.2",
-  "description": "Codex-style shell sessions for pi, with bounded waits, stdin and optional PTY.",
+  "description": "Automatic background handoff and completion notifications for Pi Bash commands.",
   "type": "module",
   "license": "MIT",
   "author": "RunMintOn",
@@ -28,25 +28,20 @@
   "files": [
     "index.ts",
     "src",
-    "scripts/setup-pty.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node scripts/setup-pty.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "check": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@types/node": "^22.19.19",
     "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "node-pty": "1.1.0"
   }
 }

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { harness, node, pi } from "./support.mjs";
+import { harness, node, pi, textOf } from "./support.mjs";
 
-test("pipe and PTY commands can find Pi-managed binaries just like native Bash", async () => {
+test("commands can find Pi-managed binaries just like native Bash", async () => {
   const h = await harness({ shellPath: "/bin/bash" });
   try {
     const bin = join(h.dir, "agent", "bin");
@@ -15,11 +15,8 @@ test("pipe and PTY commands can find Pi-managed binaries just like native Bash",
       onData: data => { native += data; },
     });
     assert.equal(native, "MANAGED_BINARY");
-    for (const tty of [false, true]) {
-      const result = await h.call("managed binary " + tty, { command: "async-managed-probe", tty });
-      assert.equal(result.details.exit_code, 0);
-      assert.equal(result.details.output, "MANAGED_BINARY");
-    }
+    const result = await h.call("managed binary", { command: "async-managed-probe" });
+    assert.equal(textOf(result), native);
   } finally { await h.close(); }
 });
 
@@ -51,8 +48,7 @@ test("post-exit output drains while active, but quiet inherited pipes do not hol
       assert.equal(native, expected);
       const started = performance.now();
       const result = await h.call("inherited pipes " + active, { command });
-      assert.equal(result.details.output, expected);
-      assert.equal(result.details.exit_code, 0);
+      assert.equal(textOf(result), expected);
       if (!active) assert(performance.now() - started < 1500, "a quiet inherited pipe blocked completion");
     }
   } finally { await h.close(); }
