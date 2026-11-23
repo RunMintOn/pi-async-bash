@@ -73,7 +73,7 @@ npm test
 - 改工具描述、`promptSnippet` 或 `promptGuidelines` 时读 [模型可见提示词的设计规则](PROMPT_DESIGN.md)，其中记录了分层和已固定措辞的理由。
 - 改 `exposure`、`--tools` 或工具可见性断言时读 [Pi 工具可见性](PI_TOOL_EXPOSURE.md)，其中有三种模式的实测声明形状和验证手法。
 - 调整交接或等待时长时，读[阈值样本与统计口径](THRESHOLD_ANALYSIS.md)。比较其他 Agent 的执行与提示设计时，读[异步 Shell 调研索引](.scratch/async-bash-research/README.md)。
-- [TICKETS.md](TICKETS.md) 记录历史实现与验收。
+- [TICKETS.md](TICKETS.md) 记录历史实现与验收。动手前先读 [PROJECT_MEMORY.md](PROJECT_MEMORY.md)，其中有每轮决策的原因、已暂缓的问题和未验证边界。
 
 ## License
 

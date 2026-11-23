@@ -1,5 +1,12 @@
 # 本地实施记录
 
+## T15 — 自测九条发现的复核
+
+- 已实现并提交 `d01db62`（分支 `experiment/bash-task-handoff`）。证据台账 [`.scratch/dogfood/findings.md`](.scratch/dogfood/findings.md)，决策与暂缓理由见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md) 的 2026-11-24「自测九条发现的复核与四项修正」一节。
+- 修正四项。`bash_sync` 描述补 1 MiB 结构化输出上限与超时抛异常（原生行为，非缺陷）；`bash_task` 运行中首行加 `(Ns elapsed)`；超时或停止且输出全展示时标题改 `Captured output`；`README` / `SPEC` / `PROMPT_DESIGN` 同步。
+- 暂缓五项（用户决定）：结果不带命令原文、日志保留到进程退出、模型侧停止入口、`timed_out` / `stopped` 的 `isError`、非法 UTF-8 与任务列表等次要项。
+- 验收：`npm run check` 通过，`npm test` 22/22（约 109 秒）。真实模型遵循度与 `/bash-stop` 的 TUI 反馈仍未验证。
+
 ## T14 — 任务 ID、总耗时与结果正文
 
 - 已实现并提交 `5e11353`（分支 `experiment/bash-task-handoff`）。契约见 [SPEC.md](SPEC.md)，决策原因与分层事实见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md) 的 2026-11-24 一节。

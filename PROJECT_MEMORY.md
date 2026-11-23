@@ -45,3 +45,16 @@
 - 正文定稿：`Bash task <id> <status> (<n>s total)`、`Log: <path>`、空行、`<scope> (<lines>)`、空行、输出。`formatTask` 用 `Math.floor` 取整秒，`running` 写 `is running`。否掉：`·` 分隔（用户判断不好看）、逐行行号（`Complete output (36 lines)` 已足够定位，保留命令原文更便于复制）。
 - 分层事实，本轮反复确认过：`pi.sendMessage()` 的 `content` 经 `convertToLlm` 进模型上下文，`details` 不进，只给 TUI renderer。`25` 不注册渲染器，默认 `CustomMessageComponent` 显示 `[async-bash-completion]` 标签；`22-pi-compact-tool` 注册 renderer 后接管显示。同一个正文两边都能看到，标题和折叠状态只在 TUI。
 - 验收：`npm run check` 与 `test/rpc.test.mjs` 通过。用例断言 6 位 ID、日志路径以 ID 命名、`wall_time_seconds >= 30`，以及通知与 `bash_task` 的耗时、正文完全一致。提交 `5e11353`。
+
+## 2026-11-24 — 自测九条发现的复核与四项修正
+
+- 证据台账是 [`.scratch/dogfood/findings.md`](.scratch/dogfood/findings.md)：含已确认正常的边界清单（交接/超时/截断逐字节边界、多字节安全、20 MB 日志预览、归属隔离、退出清理）与九条发现。该文件按 `fixed` / `deferred` 标状态，重做前先读它，不要从聊天记录重建结论。
+- 复核结论：九条都属实，但只有四条是契约或文案级问题。**`bash_sync` 的 `truncated` / `full_output_path` 不是缺陷**，原生结构化输出上限是 1 MiB（`STRUCTURED_OUTPUT_MAX_BYTES`），多 1 字节即截断，108 KB 与恰好 1 MiB 都返回 `truncated: false` 属设计如此。第 2 条同理，超时抛裸 `Error`（`<已写出的输出>\n\nCommand timed out after N seconds`）是原生行为。同一上限事实已记在 [PI_TOOL_EXPOSURE.md](PI_TOOL_EXPOSURE.md) 第 4 节「踩过的坑」，不要在别处复制正文。
+- 这类「描述承诺了原生根本没承诺的字段」的判断，先读 Pi 的 `dist/core/tools/bash.js` 再下结论。同进程脚本 `tools.bash_sync` 拿到的是 `structuredContent`，与模型侧文本上限（2000 行 / 50 KiB）是两套口径。
+- **`Captured output` 的理由**：超时与停止是外部打断，已落盘输出确实完整，但和 `timed out` / `stopped` 并排时 `Complete output` 会被读成「命令跑完了」。`formatTask` 因此新增 `interrupted` 分支，优先级低于 `truncated`、高于默认。
+- **耗时字段的边界**：运行中耗时只进正文，不进结构化字段。`wall_time_seconds` 保持终态口径（命令启动到执行结束）；`TaskManager.wait()` 对 `running` 额外返回 `elapsedSeconds`，`index.ts` 解构时将其丢弃，只用于拼 `(Ns elapsed)`。任何把 `elapsedSeconds` 塞进 `details` / `structuredContent` 的改动都会让调用方把快照耗时误当最终结果。
+- 暂缓项与理由（用户 2026-11-24 明确决定「都暂缓」，重提前先问）：结果不带命令原文、日志与任务记录保留到进程退出、模型侧无停止入口、`bash_task` 对 `timed_out` / `stopped` 返回 `isError`、非法 UTF-8 替换为 U+FFFD、无任务列表、`timeout: 0` 报 `must be a finite number of seconds`。
+- 暂缓项里价值最高的是「按 `task_id` 停止」。本轮实测的绕行路径是查到 PGID 后 `kill -TERM -<PGID>`，代价是状态落成 `exited with code 143`，与命令自己返回 143 无法区分（`stopped` 只由内部 `controller.abort()` 产生）。找 PID 时 `ps | grep <关键词>` 会被 `--launch-time-ticks` 之类的参数命中，一次可能刷出 50 KB。
+- `isError` 那一条：确实会对稳定终态返回错误结果，但「客户端会自动重试」没有证据，是推测。
+- 未验证：`/bash-stop` 的 TUI 反馈与状态栏变化、fork 与会话切换的界面表现、真实模型对提示词的遵循程度。RPC 层的 `/bash-stop` 行为已被 `test/rpc.test.mjs` 覆盖。
+- 验收：`npm run check` 通过，`npm test` 22/22（约 109 秒）。新增 `test/tools.test.mjs` 的 `bash_sync` 用例（恰好 1 MiB 不截断、多 1 字节截断且 `full_output_path` 指向完整文件、超时可被 `catch`），`test/rpc.test.mjs` 断言 `is running (Ns elapsed)` 与两处 `Captured output (1 line)`。
