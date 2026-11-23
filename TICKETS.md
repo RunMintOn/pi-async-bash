@@ -1,5 +1,69 @@
 # 本地实施记录
 
+## T15 — 自测九条发现的复核
+
+- 已实现并提交 `d01db62`（分支 `experiment/bash-task-handoff`）。证据台账 [`.scratch/dogfood/findings.md`](.scratch/dogfood/findings.md)，决策与暂缓理由见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md) 的 2026-11-24「自测九条发现的复核与四项修正」一节。
+- 修正四项。`bash_sync` 描述补 1 MiB 结构化输出上限与超时抛异常（原生行为，非缺陷）；`bash_task` 运行中首行加 `(Ns elapsed)`；超时或停止且输出全展示时标题改 `Captured output`；`README` / `SPEC` / `PROMPT_DESIGN` 同步。
+- 暂缓五项（用户决定）：结果不带命令原文、日志保留到进程退出、模型侧停止入口、`timed_out` / `stopped` 的 `isError`、非法 UTF-8 与任务列表等次要项。
+- 验收：`npm run check` 通过，`npm test` 22/22（约 109 秒）。真实模型遵循度与 `/bash-stop` 的 TUI 反馈仍未验证。
+
+## T14 — 任务 ID、总耗时与结果正文
+
+- 已实现并提交 `5e11353`（分支 `experiment/bash-task-handoff`）。契约见 [SPEC.md](SPEC.md)，决策原因与分层事实见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md) 的 2026-11-24 一节。
+- `task_id` 从完整 UUID 改为 6 位十六进制，撞号重抽。`bash_task` 与 `/bash-stop` 直接接收屏幕上显示的值。
+- 终态新增 `wall_time_seconds`。完成通知与 `bash_task` 共用 `describe()`，正文按整秒显示，两路结果一致。
+- 正文重排：首行状态与耗时、日志路径、空行、输出标题、空行、输出。行号与截断范围不变。
+- 配套 TUI 改动在 `22-pi-compact-tool`，见其 `checks/bash-notification-validation.md`。
+- 验收：`npm run check` 通过，`test/rpc.test.mjs` 通过。未跑完整 `npm test`：同一轮修改中只重跑了受影响的 RPC、results、footer 用例。
+
+## T13 — 一次性模式前台执行与预览标题
+
+- 已实现。`bash` 在 `ctx.mode` 为 `print` / `json` 时直接用原生 `createBashToolDefinition` 跑到结束，不建任务、不交接。`tui` 与 `rpc` 维持 30 秒交接。契约见 [SPEC.md](SPEC.md) 第一张表，提示词分层见 [PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 1 节。
+- **为什么 print/json 不交接。** 这两种模式在回答完就退出，`session_shutdown` 会终止受管任务并删除日志，交接结果无人接收。dogfooding 实测：`pi -p` 跑 `npm test` 在 30 秒交接，模型答一句后进程退出，测试随之中断；同一流程在常驻 RPC 会话首轮结束后自动唤醒，退出码 `0`、20 项通过。进程退出时机由宿主决定，扩展改不了，所以选择在前台等。
+- **为什么用 `ctx.mode` 而不是让模型判断。** 交接的价值是释放当前轮次，一次性模式没有后续轮次可接。分支放在工具执行层，模型看到的描述已按模式写明，不需要新增参数或规则。
+- **预览标题。** `formatTask` 的标题改为自描述：`Complete output (2 lines)`、`Output truncated (showing line 3)`、`Output so far (1 line)`、日志故障时 `Incomplete output`。原先 `Showing lines 1–37` 要靠有无 `(preview truncated)` 反推是否全文，模型会为确认再读一遍日志。
+- **接受的代价。** 超长行不是最后一行时，该行整体不进预览（只保留完整行）。用户已明确选此方案，理由是预览可读性优先，完整日志随时可查。落到 `truncated: true` 和 `showing line N` 上，模型能知道省略了一行并去看日志。改成保留后缀会破坏「优先完整行」这条已定规则。
+- **未改。** 三个工具的分工、`bash_sync` 输出上限、工具选择规则均不变。`bash_sync` 返回 100 KB 且 `truncated: false` 复核为设计如此，不是缺陷。
+- 验收：`npm run check` 通过。新增 `test/one-shot.test.mjs`（`-p` 与 `--mode json` 各跑一条 31 秒命令，断言拿到末尾输出和退出码 7），`test/rpc.test.mjs` 增加标题断言和超大中间行场景，`test/cache-prefix.test.mjs` 显式以 `rpc` 模式运行。分区回归通过（cache-prefix 30.2s、one-shot 31.3s、rpc 39.3s）；修正测试后未重跑完整套件。
+
+## T12 — 三个工具按 exposure 分工
+
+- 已实现。`bash` 与 `bash_task` 为 `model-only`，新增 `bash_sync` 为 `codemode`。规格与提示词见 [SPEC.md](SPEC.md)、[D 稿](.scratch/bash-task-handoff/prompt-d-split.md)、[PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 4 节。
+- `bash_sync` 直接用原生 `createBashToolDefinition`，沿用原生输出与截断处理。后台任务归 `bash` 的交接流程管理。
+- `test/instructions.test.mjs` 捕获未启用 codemode、`on` 和 `only` 三种模式的工具声明。`test/rpc.test.mjs` 以 `--tools +codemode` 验证脚本可调用 `bash_sync` 并获得非零退出码。
+- 未提交、未发布，包版本仍 0.1.2。
+
+## T11 — 长命令交接、有限等待与原会话自动接续
+
+- 已实现。见[本地规格](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md)。以 Pi 1.6.0 验收，20 个测试通过，包括真实 RPC 用户旅程和 OpenAI 适配器请求前缀回归。
+- 提示词按分层重写：`running` 是正常状态、`sleep` 会推迟看到已就绪的结果、查进度用 `wait_seconds: 0`、阻塞只在用户明确要求时。A/B/C 三稿、理由与被否掉的 `handoff: false` 方案见 [PROMPT_DESIGN.md](PROMPT_DESIGN.md)。
+
+## T10 — 方案 A：接口收紧、原生复用与模型说明
+
+- 状态：已完成。三个本地任务位于 `.scratch/interactive-bash-refinement/issues/`，按用户授权直接串行实施，不派发子代理，不创建远端 issue。
+- 删除并拒绝 workdir；保留普通管道持续 stdin 和可选 PTY。两个工具及 codemode 恢复 truncated、full_output_path、wall_time_seconds；耗时按单次调用计算。
+- 完成原生能力逐项对应；复用 Pi 公开 Shell 配置、截断和原生提示词定义，适配管理命令 PATH 与按活动重置的退出后管道排空，不修改宿主、不导入内部模块。
+- 完成 Codex 原文、版本与位置对应；恢复两个 Snippet 和适用环境指引，加入 60 秒阻塞等待建议，300 秒等待能力上限不变。直接与 codemode-only 的真实请求均已检查。
+- 完整回归 30/30，通过约 39.3 秒：`/tmp/async-refine-final-tests.log`。类型检查：`/tmp/async-refine-final-check.log`。manifest/lock 一致性、差异空白检查通过。
+- 本轮的来源表、工具完整 diff、红灯与产物路径、Standards/Spec 串行 review 见 `.scratch/interactive-bash-refinement/`。
+- 产品代码约 550 行（入口、进程、状态与安装脚本合计）。仅本地确定性 provider；Linux 未实测，未调用真实模型、修改加载配置、push 或发布。原有未跟踪 ARCHITECTURE.md 不包含在提交中。
+
+## T9 — Codex 式命令执行与交互
+
+- 状态：已完成（上一轮，接口随后由 T10 调整）。当前行为以 `SPEC.md` 为准；单个本地任务记录在 `.scratch/codex-exec/issues/01-execution-and-interaction.md`，未创建远端 issue。
+- 保留 bash 名称，输入缩为 command、workdir、yield_time_ms、tty；新增 write_stdin，仅返回 output 与 exit_code/session_id。不保留执行 timeout 或 bash_task。
+- 实现真实管道 stdin、node-pty 终端、Ctrl+C、逐进程串行交互、增量输出、取消等待、显式用户命令 `/bash-stop`、会话引用、reload/fork、Footer 和退出清理。不同进程的工具调用允许并行。
+- 移除自动完成消息、自动唤醒、请求级任务快照和 JSON 任务恢复。旧日志不迁移、不删除；旧通知测试通过 trash 移除，其余测试按新契约替换。
+- 新增 node-pty 1.1.0 运行依赖及 Unix helper 安装权限修正；开发测试依赖固定到本机目标 Pi 1.4.0，host peer 仍由 Pi 提供。
+- 红灯：`/tmp/async-bash-codex-red.log`。目标版本完整回归 23/23，通过约 34 秒：`/tmp/async-bash-codex-final.log`。最后 review 修正后的相关回归 8/8：`/tmp/async-bash-codex-reviewed.log`。类型检查：`/tmp/async-bash-codex-check.log`；`git diff --check` 通过。
+- 真实 RPC、PTY、SIGTERM、退出与新进程拒绝旧引用均已检查。最终 RPC 记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-CL2pMr`；信号清理记录：`/var/folders/zh/qf_nccyd0_b0fc84rk8dl4lm0000gp/T/pi-async-rpc-wPgRnf`。
+- 已打包到临时目录并作为消费者安装，真实 PTY 输出 `PACKAGE_PTY_OK`：`/tmp/pi-async-bash-package-HTIcK9`。未发布。
+- Standards/Spec review 由当前 Agent 串行完成，不使用子代理。没有调用真实模型服务，没有自动加载或修改用户配置，也没有 commit/push。原有未跟踪 `ARCHITECTURE.md` 保持不变。
+
+## 历史实施记录
+
+以下记录描述已被 T9 替代的旧契约及当时的分支、版本和授权。
+
 集成分支：`integration/async-bash`。串行实施，不创建远端 issue 或 PR；初始实现已按用户后续要求提交为 `e16a439`。
 用户已授权直接按本地 spec 实施，测试边界沿用 spec 中的真实会话与 RPC。
 

@@ -9,9 +9,10 @@ export const { createAssistantMessageEventStream } = await import("@earendil-wor
 export const extensionPath = resolve("index.ts");
 export const textOf = (m) => typeof m.content === "string" ? m.content :
   (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-export const isTaskState = (m) => m.role === "user" && /^Task [\da-f-]+: \w+; exit_code=.*; log=/.test(textOf(m));
-export const lastConversationMessage = (context) => context.messages.findLast((m) => !isTaskState(m));
+export const lastConversationMessage = (context) => context.messages.at(-1);
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const quote = text => "'" + text.replaceAll("'", "'\\''") + "'";
+export const node = script => `${quote(process.execPath)} -e ${quote(script)}`;
 export function eventOnce(session, predicate, timeout = 45000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { off(); reject(new Error("Session event deadline")); }, timeout);

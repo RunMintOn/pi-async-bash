@@ -1,275 +1,315 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, createWriteStream, mkdtempSync, openSync, readSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { truncateTail } from "@earendil-works/pi-coding-agent";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { finished } from "node:stream/promises";
 
-type Result = AgentToolResult<unknown> & { structuredContent?: unknown; isError?: boolean };
-export type TaskStatus = "running" | "exited" | "killed" | "timed_out" | "failed" | "unknown";
-export interface TaskRecord {
+export const handoffMs = 30_000;
+export const maxWaitSeconds = 300;
+export const completionType = "async-bash-completion";
+const previewBytes = 4 * 1024;
+const previewLines = 40;
+
+export interface Handoff {
+  status: "running";
   task_id: string;
-  owner_session_id: string;
-  cwd: string;
-  status: TaskStatus;
   log_path: string;
-  started_at: number;
-  finished_at?: number;
-  exit_code: number | null;
-  total_bytes: number;
-  total_lines: number | null;
-  error?: string;
 }
-interface LiveTask {
-  record: TaskRecord;
+
+export interface TaskResult extends Omit<Handoff, "status"> {
+  status: "running" | "exited" | "timed_out" | "stopped" | "failed";
+  exit_code?: number;
+  wall_time_seconds?: number;
+  error?: string;
+  log_error?: string;
+  output_tail: string;
+  truncated: boolean;
+  start_line?: number;
+  end_line?: number;
+  partial_line?: boolean;
+}
+
+export function taskResult(details: unknown): details is TaskResult {
+  return !!details && typeof details === "object" && "task_id" in details && "output_tail" in details;
+}
+
+interface Task {
+  ref: Handoff;
+  owner: string;
+  started_at: number;
   controller: AbortController;
   handed: boolean;
-  stopRequested: boolean;
+  delivered: boolean;
+  bytes: number;
+  newlines: number;
+  lastByte?: number;
   done: Promise<void>;
-}
-type Outcome = { result: Result } | { error: Error };
-const handoffMs = 63_000;
-const taskIdPattern = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
-
-export function eventId(task: TaskRecord) {
-  return `${task.task_id}:terminal`;
+  final?: Pick<TaskResult, "status" | "exit_code" | "error" | "log_error"> & { wall_time_seconds: number };
 }
 
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const abort = () => { cleanup(); reject(new Error("Task control aborted.")); };
-    const cleanup = () => signal?.removeEventListener("abort", abort);
-    if (signal?.aborted) return abort();
-    signal?.addEventListener("abort", abort, { once: true });
-    promise.then((value) => { cleanup(); resolve(value); }, (error) => { cleanup(); reject(error); });
-  });
+interface Execution {
+  signal: AbortSignal;
+  start: (timeout?: number) => void;
+  log: (data: Buffer) => boolean;
+  exited: (exitCode: number | null) => void;
+  timedOut: () => void;
+}
+
+function utf8Start(bytes: Buffer, offset: number) {
+  while (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80) offset++;
+  return offset;
+}
+
+function preview(task: Task, status: TaskResult["status"]): TaskResult {
+  const result: TaskResult = { ...task.ref, status, output_tail: "", truncated: false };
+  if (!task.bytes) return result;
+
+  // Read one extra byte to know if the first visible line starts inside a line.
+  const windowStart = Math.max(0, task.bytes - previewBytes);
+  const readStart = Math.max(0, windowStart - 1);
+  const bytes = Buffer.alloc(task.bytes - readStart);
+  const fd = openSync(task.ref.log_path, "r");
+  try { readSync(fd, bytes, 0, bytes.length, readStart); }
+  finally { closeSync(fd); }
+
+  let start = windowStart - readStart;
+  let partial = start > 0 && bytes[0] !== 10;
+  if (partial) {
+    const newline = bytes.indexOf(10, start);
+    if (newline !== -1 && newline < bytes.length - 1) {
+      start = newline + 1;
+      partial = false;
+    } else {
+      start = utf8Start(bytes, start);
+    }
+  }
+  const text = new TextDecoder("utf-8", { ignoreBOM: true })
+    .decode(bytes.subarray(start), { stream: status === "running" });
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  let first = lines.length;
+  let count = 0;
+  while (first > 0 && lines.length - first < previewLines) {
+    const line = lines[first - 1];
+    const size = Buffer.byteLength(line);
+    if (count + size > previewBytes) {
+      if (first === lines.length) {
+        const raw = Buffer.from(line);
+        lines[--first] = raw.subarray(utf8Start(raw, raw.length - previewBytes)).toString();
+        partial = true;
+      }
+      break;
+    }
+    count += size;
+    first--;
+  }
+  result.output_tail = lines.slice(first).join("");
+  result.truncated = windowStart > 0 || first > 0 || partial;
+  if (result.output_tail) {
+    const end = task.newlines + Number(task.lastByte !== 10 && !text.endsWith("\n"));
+    result.end_line = end;
+    result.start_line = end - (lines.length - first) + 1;
+    if (partial) result.partial_line = true;
+  }
+  return result;
+}
+
+function describe(task: Task): TaskResult {
+  return { ...preview(task, task.final?.status ?? "running"), ...task.final };
 }
 
 export class TaskManager {
-  private readonly instance = randomUUID();
-  private readonly live = new Map<string, LiveTask>();
-  private readonly listeners = new Set<(record: TaskRecord) => void>();
-  private closing = false;
+  private directory?: string;
+  private readonly tasks = new Map<string, Task>();
+  private readonly listeners = new Set<() => void>();
+  private readonly initialWaitMs: number;
 
-  constructor(private readonly directory: string) {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  constructor(initialWaitMs = handoffMs) {
+    this.initialWaitMs = initialWaitMs;
   }
 
-  private save(record: TaskRecord) {
-    const path = join(this.directory, `${record.task_id}.json`);
-    const temporary = `${path}.${this.instance}.tmp`;
-    writeFileSync(temporary, JSON.stringify(record), { mode: 0o600 });
-    renameSync(temporary, path);
-  }
-
-  subscribe(listener: (record: TaskRecord) => void) {
+  subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
 
-  async execute(options: {
-    owner: string;
-    cwd: string;
-    timeout?: number;
-    signal?: AbortSignal;
-    run: (signal: AbortSignal, log: (data: Buffer) => void, started: () => void) => Promise<Result>;
-  }): Promise<Result> {
-    if (this.closing) throw new Error("pi is shutting down.");
-    let id: string;
-    let fd: number;
-    while (true) {
-      id = randomBytes(4).toString("hex");
-      if (this.live.has(id) || existsSync(join(this.directory, `${id}.json`))) continue;
-      try {
-        // Exclusive creation also reserves the ID against other pi processes.
-        fd = openSync(join(this.directory, `${id}.log`), "wx", 0o600);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-    }
-    const record: TaskRecord = {
-      task_id: id, owner_session_id: options.owner,
-      cwd: options.cwd, status: "running", log_path: join(this.directory, `${id}.log`),
-      started_at: Date.now(), exit_code: null, total_bytes: 0, total_lines: 0,
-    };
+  private changed() {
+    for (const listener of this.listeners) listener();
+  }
+
+  async execute<T>(
+    owner: string, signal: AbortSignal | undefined, run: (execution: Execution) => Promise<T>,
+  ): Promise<T | Handoff> {
+    this.directory ??= mkdtempSync(join(tmpdir(), "pi-async-bash-"));
+    let task_id: string;
+    do { task_id = randomBytes(3).toString("hex"); } while (this.tasks.has(task_id));
+    const log_path = join(this.directory, `${task_id}.log`);
+    const fd = openSync(log_path, "wx", 0o600);
+    const stream = createWriteStream(log_path, { fd });
     const controller = new AbortController();
-    let finish!: () => void;
-    const task: LiveTask = {
-      record, controller, handed: false, stopRequested: false,
-      done: new Promise<void>((resolve) => { finish = resolve; }),
+    const task: Task = {
+      ref: { status: "running", task_id, log_path }, owner, started_at: performance.now(),
+      controller, handed: false, delivered: false, bytes: 0, newlines: 0,
+      done: Promise.resolve(),
     };
-    this.live.set(id, task);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let lastByte: number | undefined;
-    let newlines = 0;
-    let logError: Error | undefined;
-    let release!: () => void;
-    const threshold = new Promise<"handoff">((resolve) => { release = () => resolve("handoff"); });
+    this.tasks.set(task_id, task);
+
     const abort = () => controller.abort();
-    if (options.signal?.aborted) abort();
-    options.signal?.addEventListener("abort", abort, { once: true });
-    const started = () => {
-      record.started_at = Date.now();
-      // A shorter execution timeout must settle as a foreground timeout.
-      if (options.timeout === undefined || options.timeout * 1000 > handoffMs) timer = setTimeout(release, handoffMs);
-    };
-    const log = (data: Buffer) => {
-      if (logError) return;
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let handoff!: (value: "handoff") => void;
+    const threshold = new Promise<"handoff">(resolve => { handoff = resolve; });
+    let timedOut = false;
+    let logError: string | undefined;
+    const logFinished = finished(stream).catch((error: Error) => {
+      logError = `Cannot write the complete command log: ${error.message}`;
+      abort();
+    });
+    const execution = (async () => {
+      let exit_code: number | undefined;
+      let outcome: { result: T } | { error: unknown };
+      let wall_time_seconds: number;
       try {
-        let offset = 0;
-        while (offset < data.length) offset += writeSync(fd, data, offset, data.length - offset);
-        record.total_bytes += data.length;
-        for (const byte of data) if (byte === 10) newlines++;
-        if (data.length) lastByte = data[data.length - 1];
-        record.total_lines = newlines + (lastByte !== undefined && lastByte !== 10 ? 1 : 0);
+        const result = await run({
+          signal: controller.signal,
+          start: timeout => {
+            task.started_at = performance.now();
+            if (timeout === undefined || timeout * 1000 > this.initialWaitMs) {
+              timer = setTimeout(handoff, this.initialWaitMs, "handoff");
+            }
+          },
+          log: data => {
+            if (logError) return false;
+            stream.write(data, error => {
+              if (error) return;
+              task.bytes += data.length;
+              for (let i = data.indexOf(10); i !== -1; i = data.indexOf(10, i + 1)) task.newlines++;
+              if (data.length) task.lastByte = data[data.length - 1];
+            });
+            return !task.handed;
+          },
+          exited: code => { exit_code = code ?? undefined; },
+          timedOut: () => { timedOut = true; },
+        });
+        outcome = { result };
       } catch (error) {
-        logError = error instanceof Error ? error : new Error(String(error));
-        controller.abort();
-      }
-    };
-    const settle = (outcome: Outcome): Outcome => {
-      if (timer) clearTimeout(timer);
-      record.finished_at = Date.now();
-      if ("result" in outcome) {
-        const data = outcome.result.structuredContent as { exit_code?: number } | undefined;
-        record.exit_code = data?.exit_code ?? null;
-        record.status = "exited";
-      } else {
-        record.error = truncateTail(logError?.message ?? outcome.error.message, { maxLines: 1, maxBytes: 1024 }).content;
-        record.status = logError ? "failed" : task.stopRequested ? "killed" :
-          /Command timed out after [\d.]+ seconds$/.test(outcome.error.message) ? "timed_out" : "failed";
-      }
-      try {
-        closeSync(fd);
-        if (task.handed) this.save(record);
-      } catch (error) {
-        outcome = { error: error instanceof Error ? error : new Error(String(error)) };
-        record.error = `Cannot save task result: ${outcome.error.message}`;
-        record.status = "failed";
+        outcome = { error };
       } finally {
-        this.live.delete(id);
-        finish();
+        wall_time_seconds = (performance.now() - task.started_at) / 1000;
+        clearTimeout(timer);
+        stream.end();
+        await logFinished;
       }
       if (task.handed) {
-        for (const listener of this.listeners) listener({ ...record });
+        task.final = {
+          wall_time_seconds,
+          ...(logError ? { status: "failed", log_error: logError } :
+            "result" in outcome ? { status: "exited", exit_code } :
+            timedOut ? { status: "timed_out" } :
+            controller.signal.aborted ? { status: "stopped" } :
+            { status: "failed", error: (outcome.error as Error).message }),
+        };
+        this.changed();
+      } else {
+        unlinkSync(log_path);
+        this.tasks.delete(task_id);
       }
-      return outcome;
-    };
-    const execution = Promise.resolve()
-      .then(() => options.run(controller.signal, log, started))
-      .then((result) => settle({ result }), (error: unknown) =>
-        settle({ error: error instanceof Error ? error : new Error(String(error)) }));
+      return logError ? { error: new Error(logError) } : outcome;
+    })();
+    task.done = execution.then(() => {});
+
     try {
-      const outcome = await Promise.race([execution, threshold]);
-      if (outcome !== "handoff" || record.status !== "running" || controller.signal.aborted || this.closing) {
-        const completed = outcome === "handoff" ? await execution : outcome;
-        if ("error" in completed) throw completed.error;
-        return completed.result;
+      const first = await Promise.race([execution, threshold]);
+      if (first === "handoff" && this.tasks.has(task_id) && !controller.signal.aborted) {
+        task.handed = true;
+        this.changed();
+        return task.ref;
       }
-      // Persist before dropping the turn's abort listener: the reference is recoverable even if the turn aborts now.
-      this.save(record);
-      task.handed = true;
-      return {
-        content: [{ type: "text", text:
-          `Still running after 63 seconds. Task: ${id}\nLog: ${record.log_path}\n` +
-          "You will be notified when it finishes. Do not poll. " +
-          "Continue work that does not depend on this result. If none remains, end your turn and resume when notified.\n" +
-          "The task stops when pi exits; any execution timeout still applies." }],
-        details: { ...record },
-        structuredContent: { ...record, wall_time_seconds: (Date.now() - record.started_at) / 1000 },
-      };
-    } catch (error) {
-      if (record.status === "running") {
-        task.stopRequested = true;
-        controller.abort();
-        await execution;
-      }
-      throw error;
+      const outcome = first === "handoff" ? await execution : first;
+      if ("error" in outcome) throw outcome.error;
+      return outcome.result;
     } finally {
-      options.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
     }
   }
 
-  get(id: string): TaskRecord {
-    if (!taskIdPattern.test(id)) throw new Error("Invalid task_id.");
-    const active = this.live.get(id);
-    if (active?.handed) return { ...active.record };
-    const path = join(this.directory, `${id}.json`);
-    if (!existsSync(path)) throw new Error(`Unknown task: ${id}`);
-    const record = JSON.parse(readFileSync(path, "utf8")) as TaskRecord;
-    if (record.task_id !== id) throw new Error(`Invalid task record: ${id}`);
-    if (record.status === "running") {
-      // Another pi process may still own it. Never adopt or kill based on a persisted PID.
-      return { ...record, status: "unknown", total_lines: null, error: "Execution belongs to an unavailable pi runtime; exit result is unknown." };
-    }
-    return record;
+  private get(owner: string, id: string): Task {
+    const task = this.tasks.get(id);
+    if (!task?.handed || task.owner !== owner) throw new Error(`Unknown or unavailable bash task: ${id}`);
+    return task;
   }
 
-  async control(id: string, action: "status" | "kill", signal?: AbortSignal): Promise<Result> {
-    let record = this.get(id);
-    if (action === "kill" && record.status === "running") {
-      const task = this.live.get(id)!;
-      task.stopRequested = true;
-      task.controller.abort();
-      await abortable(task.done, signal);
-      record = this.get(id);
+  async wait(owner: string, id: string, seconds: number, signal?: AbortSignal): Promise<TaskResult & { elapsedSeconds?: number }> {
+    const task = this.get(owner, id);
+    signal?.throwIfAborted();
+    if (!task.final && seconds > 0) {
+      let timer: ReturnType<typeof setTimeout>;
+      let abort: () => void;
+      await Promise.race([task.done, new Promise<void>((resolve, reject) => {
+        timer = setTimeout(resolve, seconds * 1000);
+        abort = () => reject(signal?.reason);
+        signal?.addEventListener("abort", abort, { once: true });
+      })]).finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+      });
     }
-    return this.describe(record, action !== "status");
+    signal?.throwIfAborted();
+    const result = describe(task);
+    return result.status === "running" ? { ...result, elapsedSeconds: (performance.now() - task.started_at) / 1000 } : result;
   }
 
-  describe(record: TaskRecord, reportFailure = false): Result {
-    const size = statSync(record.log_path).size;
-    const fd = openSync(record.log_path, "r");
-    let tail: string;
-    try {
-      const bytes = Buffer.alloc(Math.min(size, 16384 + 4));
-      readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length));
-      let offset = 0;
-      while (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80) offset++;
-      tail = truncateTail(bytes.subarray(offset).toString("utf8"), { maxLines: 100, maxBytes: 16384 }).content;
-    } finally { closeSync(fd); }
-    const data = { ...record, total_bytes: size, output: tail, wall_time_seconds:
-      ((record.finished_at ?? Date.now()) - record.started_at) / 1000 };
-    return {
-      content: [{ type: "text", text: `Task ${record.task_id}: ${record.status}; exit_code=${record.exit_code}; ` +
-        `${data.wall_time_seconds.toFixed(1)}s\nLog: ${record.log_path} (${record.total_lines ?? "unknown"} lines, ${size} bytes)\n${tail}` }],
-      details: { ...data, ...(record.status !== "running" ? { task_event_id: eventId(record) } : {}) },
-      structuredContent: data,
-      ...(reportFailure && (record.status !== "exited" || record.exit_code !== 0) ? { isError: true } : {}),
-    };
+  markDelivered(owner: string, id: string) {
+    const task = this.tasks.get(id);
+    if (task?.owner === owner && task.final) task.delivered = true;
   }
 
-  *forSession(owner: string, references: Set<string>): Generator<TaskRecord> {
-    const emitted = new Set<string>();
-    for (const task of this.live.values()) {
-      if (task.handed && (task.record.owner_session_id === owner || references.has(task.record.task_id))) {
-        emitted.add(task.record.task_id);
-        yield { ...task.record };
-      }
+  async stop(owner: string, id: string) {
+    const task = this.get(owner, id);
+    task.controller.abort();
+    await task.done;
+  }
+
+  backgroundTasks(owner: string) {
+    const running: number[] = [];
+    const finished: string[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.owner !== owner || !task.handed) continue;
+      if (task.final) finished.push(task.ref.task_id);
+      else running.push(task.started_at);
     }
-    for (const file of readdirSync(this.directory)) {
-      if (!file.endsWith(".json") || !taskIdPattern.test(file.slice(0, -5))) continue;
-      const id = file.slice(0, -5);
-      if (emitted.has(id)) continue;
-      const record = this.get(id);
-      if (record.owner_session_id === owner || references.has(id)) yield record;
+    return { running, finished };
+  }
+
+  takeCompletions(owner: string, limit = Infinity): TaskResult[] {
+    const results: TaskResult[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.owner !== owner || !task.final || task.delivered) continue;
+      results.push(describe(task));
+      task.delivered = true;
+      if (results.length === limit) break;
     }
+    return results;
   }
 
   async shutdown() {
-    this.closing = true;
-    const tasks = [...this.live.values()];
-    for (const task of tasks) { task.stopRequested = true; task.controller.abort(); }
-    await Promise.all(tasks.map((task) => task.done));
+    const tasks = [...this.tasks.values()];
+    for (const task of tasks) task.controller.abort();
+    await Promise.all(tasks.map(task => task.done));
+    if (this.directory) rmSync(this.directory, { recursive: true });
+    this.tasks.clear();
+    this.directory = undefined;
   }
 }
 
-const key = Symbol.for("pi-async-bash.managers.v1");
-export function getManager(directory: string): TaskManager {
+const key = Symbol.for("pi-async-bash.handoff-managers");
+export function getManager(agentDir: string): TaskManager {
   const globals = globalThis as typeof globalThis & { [key]?: Map<string, TaskManager> };
   const managers = globals[key] ??= new Map();
-  let manager = managers.get(directory);
-  if (!manager) { manager = new TaskManager(directory); managers.set(directory, manager); }
+  let manager = managers.get(agentDir);
+  if (!manager) {
+    manager = new TaskManager();
+    managers.set(agentDir, manager);
+  }
   return manager;
 }

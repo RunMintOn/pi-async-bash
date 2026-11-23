@@ -13,23 +13,15 @@ export default function localProvider(pi: ExtensionAPI) {
     }],
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
-      const last = context.messages.findLast((m) => {
-        const text = typeof m.content === "string" ? m.content :
-          m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-        return m.role !== "user" || !/^Task [\da-f-]+: \w+; exit_code=.*; log=/.test(text);
-      })!;
+      const last = context.messages.at(-1)!;
       const text = typeof last.content === "string" ? last.content :
         last.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
       const calls = last.role === "user" && text.startsWith("CALL ") ? JSON.parse(text.slice(5)) : [];
-      const state = text.startsWith("STATE_") ? context.messages
-        .filter((m) => m.role === "user")
-        .map((m) => typeof m.content === "string" ? m.content : m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"))
-        .filter((s) => s.startsWith("Task ")).join("\n") : "";
       const message = {
         role: "assistant" as const, api: model.api, provider: model.provider, model: model.id,
         content: calls.length ? calls.map((call: { name: string; args: object }) => ({
           type: "toolCall" as const, id: `call-${++sequence}`, name: call.name, arguments: call.args,
-        })) : [{ type: "text" as const, text: state || `ACK ${text.slice(0, 500)}` }],
+        })) : [{ type: "text" as const, text: `ACK ${text.slice(0, 500)}` }],
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         stopReason: calls.length ? "toolUse" as const : "stop" as const, timestamp: Date.now(),
@@ -39,13 +31,5 @@ export default function localProvider(pi: ExtensionAPI) {
       stream.end();
       return stream;
     },
-  });
-  pi.registerCommand("test-reload", {
-    description: "Reload for lifecycle tests",
-    handler: async (_args, ctx) => { await ctx.reload(); },
-  });
-  pi.registerCommand("test-tree", {
-    description: "Navigate without an LLM summary",
-    handler: async (id, ctx) => { await ctx.navigateTree(id, { summarize: false }); },
   });
 }

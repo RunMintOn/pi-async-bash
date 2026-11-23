@@ -1,199 +1,137 @@
-# Async Bash
+# Async Bash for Pi
 
-Long bash commands no longer hold a tool call hostage.
+[简体中文](README.zh-CN.md)
 
-> **Beta.** The extension works and is published, but some of its design is still unsettled. Treat it as usable for daily work, not as a stable interface.
->
-> Known design difficulties:
->
-> - **Prompt-cache preservation is still being improved.** Task-state snapshots are currently added temporarily at the end of each model request. This avoids inserting changing state before the conversation history, but the snapshot moves as the conversation grows. Recent context after the previous snapshot may therefore need to be processed again rather than read from cache. We are still exploring a better mechanism; the current approach does not guarantee full cache reuse.
-> - **Completion delivery is scheduled by pi, not by this extension.** A finished task sends one message through pi's steering queue. Delivery happens at a turn boundary the host chooses, and it does not interrupt a running tool batch. In a real session, one completion was observed arriving about 104 minutes late. The extension cannot bound that latency; the most it can do is hand the message over as early as the host allows.
-> - **It depends on host internals.** The handoff reads the local shell backend, and the notification relies on delivery and settle hooks in pi 1.3.0. A pi release that changes those paths can break the extension quietly, without a load error.
-> - **The 63-second threshold is a fixed waiting time, not a configured value.** It is chosen to sit under the default tool timeout and is not adjustable per project.
-> - **It cannot compose another execution backend.** Any other extension that also registers `bash` conflicts with this one; pi picks a definition by load order instead of composing two backends.
-> - **Background state is process-local.** Tasks do not survive quitting pi, are not adopted across processes, and descendants that leave the process group are not tracked.
->
-> Verified on pi 1.3.0, Node 22.23.2 and macOS only. Windows is untested.
-
-## What installing it changes
-
-One changed behaviour and one new tool:
-
-1. A `bash` call still running after 63 seconds returns a task ID instead of blocking. The command keeps running and the session is notified when it ends.
-2. `bash_task` is added, so the session can check or stop those tasks.
+Keep working in Pi while a build or test runs. In interactive and RPC sessions, a command that is still running after 30 seconds moves into the background. The same process keeps running, and Pi delivers its result to the session that started it.
 
 ```mermaid
-flowchart TB
-  subgraph before["Before: the tool call owns the wait"]
-    b1["bash({ command, timeout })"] --> b2["pi runs the command"]
-    b2 --> b3["the tool call waits for the exit code"]
-    b3 --> b4["one result: output, exit code, wall time"]
-  end
-  subgraph after["After: the wait can be released once"]
-    a1["bash({ command, timeout })"] --> a2["pi runs the same command"]
-    a2 --> a3{"still running after 63 s?"}
-    a3 -->|"no"| a4["same result as before"]
-    a3 -->|"yes"| a5["result: status running, task_id, log path"]
-    a5 --> a6["the turn continues"]
-    a2 -.->|"same process, never restarted"| a7["command exits"]
-    a7 --> a8["completion message wakes the session that started it"]
-  end
+flowchart TD
+  A["The model calls bash and Pi starts the command"] --> B{"Still running after 30 seconds?"}
+  B -->|Finished within 30 seconds| C["Return the native Bash result"]
+  B -->|Still running| D["Return a task ID and log path"]
+  D --> E["The session can keep working while the command runs"]
+  E --> F["The command finishes and Pi delivers the result to the original session"]
+  D -.-> G["Check with bash_task or stop with /bash-stop"]
 ```
 
-### The bash interface is unchanged
+## Quick start
 
-| | |
-|---|---|
-| Tool name | `bash` |
-| Parameters | `command` and `timeout`, same schema and validation. There is no `background` parameter, so the model never guesses how long a command will take |
-| Shell | Same `shellPath`, `shellCommandPrefix`, session environment (`PI_SESSION_ID` and friends) and `tool_call` policies |
-| Foreground | Same native execution code, wrapped only to copy output into a log. Same output text, same truncation to 2000 lines / 50 KB, same exit code and error marking |
-| Timeout | Still an execution limit. A `timeout` of 63 seconds or less never hands off |
+### Install and enable Code Mode
 
-Three things about the tool definition do differ:
-
-- The description ends with one sentence that tells the model about the handoff.
-- The declared output schema accepts a normal result or a `running` result.
-- In the TUI, the bash tool no longer supplies a result renderer, so pi's generic renderer draws the result body instead of the built-in bash result widget.
-
-### What gets added
-
-| Addition | Effect |
-|---|---|
-| `bash_task` tool | `status` and `kill` for tasks owned by, or inherited by, the current session |
-| Footer status | TUI only, for example `BG 1 · 2m 10s`, refreshed every second |
-| Completion message | When a handed-off command ends, one message reaches the session that started it and may start a turn |
-| Context note | While tasks exist, a hidden `async-bash-state` message joins model requests, capped at 16 KiB |
-| Session entry | Each handoff appends an `async-bash-task` entry to the branch |
-| Files | `<agent dir>/extension-data/async-bash/` (0700) gets one `.log` per bash call, short calls included, and one `.json` per handed-off task. Nothing is deleted automatically |
-
-Two behaviours change only after a handoff:
-
-- Escape stops the turn, not the background command. Use `bash_task` with `kill`.
-- Quitting pi stops tasks owned by that process.
-
-### What it does not do
-
-- It writes no settings. `pi install` registers the package; the extension reads `shellPath` and `shellCommandPrefix` and changes neither.
-- It touches no project files, starts no daemon and opens no network connection.
-- It makes no model calls of its own. A completion message starts an ordinary turn, using your configured model like any other turn.
-- It does not adopt tasks across processes, and it does not compose another extension's private spawn hook, SSH or sandbox backend.
-
-## Install
+Tested with Pi 1.6.0. For everyday use, enable Code Mode in `on` mode.
 
 ```bash
 pi install npm:@runminton/pi-async-bash
+pi --tools +codemode
 ```
 
-Or load it for one invocation without changing your settings:
+To try it for one run, use `pi -e npm:@runminton/pi-async-bash --tools +codemode`.
+
+`--tools +codemode` adds Code Mode for this run and keeps the default tools. To enable it on every run, merge these settings into `~/.pi/agent/settings.json` or the project's `.pi/settings.json`. If you already use `defaultTools`, keep your existing selection and make sure it enables `codemode`.
+
+```json
+{
+  "defaultTools": ["+codemode"],
+  "codemode": { "mode": "on" }
+}
+```
+
+`on` is the default mode once Code Mode is enabled. With Code Mode disabled, the model can still call `bash` and `bash_task` directly. In `only` mode, those two tools remain directly callable, `bash_sync` stays available to scripts, and built-in tools such as `read` and `edit` move into scripts.
+
+### What changes after installation
+
+The extension registers three tools. It takes over Pi's existing `bash` entry point and adds two tools.
+
+| Tool | Where it runs | What it does |
+|---|---|---|
+| `bash` | Direct model call | Uses Pi's native Bash execution and the existing `command` and `timeout` parameters. Short commands return the native result. Long commands hand off automatically. |
+| `bash_task` | Direct model call | Checks a task's status and log tail by ID, or waits for its result for a set time. |
+| `tools.bash_sync` | Code Mode script | Uses the same native Bash execution so the script can continue with the command's result. |
+
+The extension uses Pi's configured shell path and command prefix. Any other extension that registers `bash` conflicts with this one. In one-shot runs (`pi -p` and `pi --mode json`), `bash` stays in the foreground until the command finishes, times out, or is cancelled.
+
+### Check or stop a background task
+
+- If the original session is idle, Pi starts a turn to process the result. If the session is busy, the result arrives with the next model call. If you switch sessions, the result waits until you return.
+- The terminal status bar shows background tasks and elapsed time for the current session. Once a command ends, it shows `result pending` until the result reaches the conversation.
+- Enter `/bash-stop <task_id>` in Pi to stop a handed-off task. On normal exit, Pi stops managed tasks and cleans up their logs. Task ownership stays with the original session when you fork.
+
+### Why the tools are split this way
+
+One `bash` call covers both fast and slow commands. Elapsed time determines when the call hands off. Scripts use `bash_sync` when their next step needs the output and exit code. Live task state stays in the task record and terminal status bar. Pi appends completed results to the conversation, preserving the existing context.
+
+### Upgrading from 0.1.2
+
+Handoff now starts after 30 seconds, down from 63. Replace `action: "status"` calls with `bash_task({ task_id, wait_seconds: 0 })`. For the old `action: "kill"`, enter `/bash-stop <task_id>` in Pi. In Code Mode scripts, replace `tools.bash` with `tools.bash_sync`.
+
+## Run from source
+
+Load the extension from this checkout with Pi 1.6.0.
 
 ```bash
-pi -e npm:@runminton/pi-async-bash
+npm ci
+pi -e ./index.ts
 ```
 
-Installing modifies your pi configuration explicitly through `pi install`. Loading with `-e` does not.
-
-Verified on pi 1.3.0, Node 22.23.2 and macOS. Implementation reuses pi's local shell backend; Windows is untested.
-
-Do not load another extension that overrides `bash` at the same time. pi 1.3.0 reports duplicate tools as a conflict and selects a definition by load order; it does not compose two execution backends. This extension honours the standard `shellPath`, `shellCommandPrefix` and `tool_call` restrictions.
-
-With a version of `pi-compact-tool` that no longer overrides bash execution, async-bash executes and compact renders; both load orders work. Older compact versions still register bash and must be updated together.
-
-## Usage
-
-Normal bash parameters are unchanged:
+## Tool details
 
 ```typescript
-bash({ command: "npm run e2e", timeout: 600 })
+bash({ command: "npm test", timeout: 120 })
 ```
 
-For work whose result you need, run the command in the foreground. Do not wrap it in `nohup ... &` and then wait with `sleep; tail`: the shell returns after launching the process, so this tool cannot track its completion. The tool already handles long commands and keeps their logs.
-
-If the command is still running after 63 seconds, the call returns:
-
-```text
-Still running after 63 seconds. Task: <task_id>
-Log: <absolute_log_path>
-You will be notified when it finishes. Do not poll.
-Continue work that does not depend on this result. If none remains, end your turn and resume when notified.
-```
-
-Then, on demand:
+`timeout` is the native Bash execution limit in seconds. Omit it for no execution limit. In interactive and RPC sessions, commands that finish within 30 seconds return the native Bash result. Commands still running return `status: "running"`, `task_id`, and `log_path`. Execution and the timeout clock continue after handoff.
 
 ```typescript
-bash_task({ task_id: "...", action: "status" })
-bash_task({ task_id: "...", action: "kill" })
+bash_task({ task_id: "650e2e", wait_seconds: 5 })
+bash_task({ task_id: "650e2e", wait_seconds: 0 })
 ```
 
-New task IDs are 8 random hexadecimal characters, for example `a3f8c921`, regenerated on collision. Existing UUID tasks remain readable and controllable.
+The task ID is six hexadecimal characters and also works with `/bash-stop`. `bash_task` accepts a wait of 0–300 seconds and defaults to 30. Use `0` for an immediate snapshot. If the command finishes during the wait, the final result returns immediately. Cancelling the wait or reaching its limit leaves the command running. A running result shows elapsed time. A final result or completion message shows total execution time.
 
-| Action | Behaviour |
-|---|---|
-| status | Returns the status, log location and a bounded log tail |
-| kill | Stops the managed process group and returns after observing the result; a finished task keeps its original result |
+Task lookups and completion messages include up to 40 lines and 4 KiB from the end of the log. `Captured output` means the command timed out or was stopped and all captured output fits in the preview. For truncated output, use the log path and `read` with an `offset` to see earlier lines. `start_line` and `end_line` are one-based positions in the full log. If the last line alone exceeds the byte limit, the preview identifies the visible text as the end of that line.
 
-`timeout` is the execution limit for the whole command. A background handoff does not restart it. The 63 seconds are a waiting threshold, not an execution timeout.
+## Run commands in Code Mode scripts
 
-`bash_task` no longer supports `wait`, and `bash` gains no synchronous waiting parameter. After a running result, continue work that does not depend on it; when nothing is left, end the turn and resume when notified.
+Mixed mode keeps `bash` and `bash_task` directly available and exposes `bash_sync` to scripts.
 
-Completion messages are delivered at the next available turn boundary, even while the agent continues calling tools. They do not interrupt a running tool batch. They use steering delivery rather than a follow-up queue, which would wait for the agent's entire tool loop to stop.
-
-## Footer
-
-In the TUI, current-session background tasks appear through pi's native status API. The footer itself is not replaced and compact is not required:
-
-```text
-BG 2 · 3m 12s / 1m 05s
+```bash
+pi -e ./index.ts --tools +codemode
 ```
 
-Each duration counts from when its command actually started, including the foreground 63 seconds. Entries are ordered by start time and refresh every second; IDs are not shown. A finished task is removed immediately, and the status disappears when nothing is running. Foreground commands and `unknown` tasks from an earlier runtime are never counted.
+```typescript
+const result = await tools.bash_sync({ command: "git status --short" });
+return result.output;
+```
 
-Narrow terminals drop spaces inside durations first, then report omitted entries as `+N`, for example `BG 2 · 3m12s / +1`. The native footer still applies its single-line truncation to all extension statuses.
+`bash_sync` waits for a native Bash result and returns structured output even when the exit code is nonzero. If output exceeds 1 MiB, `truncated` is `true` and `full_output_path` points to the full output. A command timeout throws an exception that the script can catch. Execution occupies a Code Mode worker and is subject to the command's `timeout` and the script's `timeout_ms`. Use a direct `bash` call for long commands that can run in the background.
 
-Switching sessions only shows tasks the current session owns or inherits by reference. The compact tool row shows `Backgrounded` to record that a handoff happened at that point; the footer shows what is running now, and the completion notification carries the final result.
+## Task lifecycle
 
-## Lifecycle
+- If a direct `bash_task` call returns the final result, Pi skips the separate completion message. The same ID remains available for later lookups.
+- Cancelling `bash` before handoff stops the command. After handoff, use `/bash-stop <task_id>`.
+- The current Pi process keeps full task logs and builds previews on demand. Normal exit stops managed tasks and removes handoff logs.
+- A fork inherits tool messages in the conversation history. Task lookup, stopping, and completion delivery stay with the session that started the command.
 
-- Before a task ID is returned, Escape cancels the running command.
-- After a task ID is returned, Escape does not stop that task; use kill.
-- `/tree`, session switching, fork/clone and reload do not stop tasks.
-- Completion notifications wake only the owning session. Returning to another branch adds state but does not replay the automatic notification.
-- fork/clone inherits the same task ID without copying the process; an inheriting session can query and stop it explicitly.
-- A normal pi exit stops tasks managed by the current process.
-- After a crash, task survival and cleanup are not promised. A new runtime marks executions it cannot confirm as `unknown`; it does not guess an exit code or adopt or stop anything based on a stale PID.
-- Long-running services usually never exit on their own. A `running` task does not mean a service is ready to accept requests.
+## Compatibility
 
-Automatic handoff releases only that one bash call. When the same batch contains other blocking tools, the current turn may still have to wait.
-
-## Output and state
-
-Completion notifications and `status` include at most 100 log lines and 16 KiB. Restored context has a separate 16 KiB total budget and does not repeatedly inject full logs.
-
-Task-state snapshots are appended after conversation history, preserving the older prefix before the previous snapshot. The transient snapshot moves as the conversation grows, so recent context after its previous position may still lose cache reuse. See the Beta notes above.
-
-Statuses are `running`, `exited`, `killed`, `timed_out`, `failed` and `unknown`. A non-zero exit is still `exited`, with the exit code kept separately. Querying a failed task with `status` is not itself a tool error; `kill` on a failing terminal state is marked as an error.
-
-Inside codemode:
-
-- Short bash calls return the original structured fields such as `output` and `exit_code`.
-- Long bash calls return `task_id`, `status: "running"`, `log_path` and similar fields, with a null exit code.
-- `bash_task` returns task status and a bounded `output`; scripts should check status and exit code.
-
-There is no automatic log cleanup, PTY, automatic retry, task list or cross-process task adoption. Termination is guaranteed only for the managed process group, excluding daemon descendants that deliberately leave it.
+- One-shot print and JSON modes run in the foreground so the result can be returned before Pi exits.
+- In Pi 1.6.0, an explicit list such as `--tools bash,bash_task` filters extension registration. Explicitly listing `bash_sync` exposes it directly to the model as well. Use `--tools +codemode` to keep the default tool split.
+- In `only` mode, Pi hides tools with `direct` exposure. The extension's `model-only` tools, `bash` and `bash_task`, remain directly callable.
 
 ## Development
 
 ```bash
-npm ci
 npm run check
 npm test
 ```
 
-Tests use a local deterministic provider, real AgentSessions, real CLI/RPC and real child processes. No external model API is called. The suite performs several real 63-second handoffs and usually takes four to five minutes.
+Tests use Pi 1.6.0, real shell commands, and an offline model. The RPC tests save event traces, and the cache regression test saves requests serialized by the OpenAI adapter. `test/one-shot.test.mjs` runs the real CLI in print and JSON modes. Test output lists the temporary directories.
 
-RPC tests print a temporary artifact directory that keeps each process's `events-<pid>.jsonl`, `stderr-<pid>.log`, session and command logs.
-
-Local implementation notes are in `TICKETS.md`, the acceptance contract in `SPEC.md`, and research evidence in `INVESTIGATION.md`.
+- For tool contracts, see [SPEC.md](SPEC.md). For completion delivery, prompts, or logging, start with [T11's maintenance notes](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md#维护要点).
+- For tool descriptions, `promptSnippet`, or `promptGuidelines`, see [model-visible prompt design](PROMPT_DESIGN.md) for the role and rationale of each layer.
+- For `exposure`, `--tools`, or visibility assertions, see [Pi tool visibility](PI_TOOL_EXPOSURE.md) for observed declarations in all three modes.
+- For handoff or wait thresholds, see [threshold measurements](THRESHOLD_ANALYSIS.md). For comparisons with other agents, see the [async shell research index](.scratch/async-bash-research/README.md).
+- [TICKETS.md](TICKETS.md) records implementation history and acceptance checks. Before changing the extension, read [PROJECT_MEMORY.md](PROJECT_MEMORY.md) for decision rationale, deferred issues, and verification limits.
 
 ## License
 
