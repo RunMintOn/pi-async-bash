@@ -1,38 +1,98 @@
 # Async Bash for Pi
 
-构建和测试可以留在后台继续跑。短命令直接返回。长命令完成后，Pi 把结果送回原会话。
+[简体中文](README.zh-CN.md)
 
-## 本地使用
+Keep working in Pi while a build or test runs. In interactive and RPC sessions, a command that is still running after 30 seconds moves into the background. The same process keeps running, and Pi delivers its result to the session that started it.
 
-用 Pi 1.6.0 加载当前工作区的扩展。
+```mermaid
+flowchart TD
+  A["The model calls bash and Pi starts the command"] --> B{"Still running after 30 seconds?"}
+  B -->|Finished within 30 seconds| C["Return the native Bash result"]
+  B -->|Still running| D["Return a task ID and log path"]
+  D --> E["The session can keep working while the command runs"]
+  E --> F["The command finishes and Pi delivers the result to the original session"]
+  D -.-> G["Check with bash_task or stop with /bash-stop"]
+```
+
+## Quick start
+
+### Install and enable Code Mode
+
+Tested with Pi 1.6.0. For everyday use, enable Code Mode in `on` mode.
+
+```bash
+pi install npm:@runminton/pi-async-bash
+pi --tools +codemode
+```
+
+To try it for one run, use `pi -e npm:@runminton/pi-async-bash --tools +codemode`.
+
+`--tools +codemode` adds Code Mode for this run and keeps the default tools. To enable it on every run, merge these settings into `~/.pi/agent/settings.json` or the project's `.pi/settings.json`. If you already use `defaultTools`, keep your existing selection and make sure it enables `codemode`.
+
+```json
+{
+  "defaultTools": ["+codemode"],
+  "codemode": { "mode": "on" }
+}
+```
+
+`on` is the default mode once Code Mode is enabled. With Code Mode disabled, the model can still call `bash` and `bash_task` directly. In `only` mode, those two tools remain directly callable, `bash_sync` stays available to scripts, and built-in tools such as `read` and `edit` move into scripts.
+
+### What changes after installation
+
+The extension registers three tools. It takes over Pi's existing `bash` entry point and adds two tools.
+
+| Tool | Where it runs | What it does |
+|---|---|---|
+| `bash` | Direct model call | Uses Pi's native Bash execution and the existing `command` and `timeout` parameters. Short commands return the native result. Long commands hand off automatically. |
+| `bash_task` | Direct model call | Checks a task's status and log tail by ID, or waits for its result for a set time. |
+| `tools.bash_sync` | Code Mode script | Uses the same native Bash execution so the script can continue with the command's result. |
+
+The extension uses Pi's configured shell path and command prefix. Any other extension that registers `bash` conflicts with this one. In one-shot runs (`pi -p` and `pi --mode json`), `bash` stays in the foreground until the command finishes, times out, or is cancelled.
+
+### Check or stop a background task
+
+- If the original session is idle, Pi starts a turn to process the result. If the session is busy, the result arrives with the next model call. If you switch sessions, the result waits until you return.
+- The terminal status bar shows background tasks and elapsed time for the current session. Once a command ends, it shows `result pending` until the result reaches the conversation.
+- Enter `/bash-stop <task_id>` in Pi to stop a handed-off task. On normal exit, Pi stops managed tasks and cleans up their logs. Task ownership stays with the original session when you fork.
+
+### Why the tools are split this way
+
+One `bash` call covers both fast and slow commands. Elapsed time determines when the call hands off. Scripts use `bash_sync` when their next step needs the output and exit code. Live task state stays in the task record and terminal status bar. Pi appends completed results to the conversation, preserving the existing context.
+
+### Upgrading from 0.1.2
+
+Handoff now starts after 30 seconds, down from 63. Replace `action: "status"` calls with `bash_task({ task_id, wait_seconds: 0 })`. For the old `action: "kill"`, enter `/bash-stop <task_id>` in Pi. In Code Mode scripts, replace `tools.bash` with `tools.bash_sync`.
+
+## Run from source
+
+Load the extension from this checkout with Pi 1.6.0.
 
 ```bash
 npm ci
 pi -e ./index.ts
 ```
 
-## 工具
+## Tool details
 
 ```typescript
 bash({ command: "npm test", timeout: 120 })
 ```
 
-`timeout` 沿用原生 Bash 的执行超时，单位为秒。省略时命令没有执行超时。在交互式和 RPC 会话里，30 秒内结束就直接拿到原生 Bash 的结果。仍在运行时，收到 `status: "running"`、`task_id` 和 `log_path`。原进程继续，执行超时也继续计时。
-
-`pi -p` 和 `pi --mode json` 会在回答后退出。这两个模式下，`bash` 在前台等到命令完成、超时或取消，再交回结果。
+`timeout` is the native Bash execution limit in seconds. Omit it for no execution limit. In interactive and RPC sessions, commands that finish within 30 seconds return the native Bash result. Commands still running return `status: "running"`, `task_id`, and `log_path`. Execution and the timeout clock continue after handoff.
 
 ```typescript
 bash_task({ task_id: "650e2e", wait_seconds: 5 })
 bash_task({ task_id: "650e2e", wait_seconds: 0 })
 ```
 
-`task_id` 是 6 位十六进制 ID，也可传给 `/bash-stop`。`bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。运行中显示从命令启动到查询时的耗时。最终结果和自动完成通知显示命令总耗时。
+The task ID is six hexadecimal characters and also works with `/bash-stop`. `bash_task` accepts a wait of 0–300 seconds and defaults to 30. Use `0` for an immediate snapshot. If the command finishes during the wait, the final result returns immediately. Cancelling the wait or reaching its limit leaves the command running. A running result shows elapsed time. A final result or completion message shows total execution time.
 
-每次查看返回状态和日志末尾，最多 40 行、4 KiB。查看结果和完成通知会标明输出范围。命令超时或被停止后，若已捕获的输出全部展示，标题显示 `Captured output`。有截断时，可以用日志路径和 `read` 的 `offset` 查看更早的内容。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
+Task lookups and completion messages include up to 40 lines and 4 KiB from the end of the log. `Captured output` means the command timed out or was stopped and all captured output fits in the preview. For truncated output, use the log path and `read` with an `offset` to see earlier lines. `start_line` and `end_line` are one-based positions in the full log. If the last line alone exceeds the byte limit, the preview identifies the visible text as the end of that line.
 
-## 脚本里的执行
+## Run commands in Code Mode scripts
 
-用混合模式同时启用模型侧的 `bash`、`bash_task` 和脚本侧的 `bash_sync`。
+Mixed mode keeps `bash` and `bash_task` directly available and exposes `bash_sync` to scripts.
 
 ```bash
 pi -e ./index.ts --tools +codemode
@@ -43,37 +103,35 @@ const result = await tools.bash_sync({ command: "git status --short" });
 return result.output;
 ```
 
-`bash_sync` 默认供 codemode 脚本调用。它使用原生 Bash 执行，等待命令结果。非零退出也会返回结构化结果。命令输出超过 1 MiB 时，脚本拿到的结果中 `truncated` 为 `true`，`full_output_path` 指向完整输出。命令超时会抛异常，脚本可以用 `try/catch` 处理。它不创建后台任务，命令执行受 `timeout` 和脚本的 `timeout_ms` 约束。等待期间脚本会占用一个 codemode worker。可以独立运行的长命令用 `bash` 交接。
+`bash_sync` waits for a native Bash result and returns structured output even when the exit code is nonzero. If output exceeds 1 MiB, `truncated` is `true` and `full_output_path` points to the full output. A command timeout throws an exception that the script can catch. Execution occupies a Code Mode worker and is subject to the command's `timeout` and the script's `timeout_ms`. Use a direct `bash` call for long commands that can run in the background.
 
-## 接续与停止
+## Task lifecycle
 
-- 任务完成时，Pi 唤醒空闲的原会话。原会话正在工作时，结果会随下一次模型调用送达。切走期间完成的结果，切回原会话时送达。
-- 模型直接调用 `bash_task` 拿到最终结果时，Pi 省去自动通知。以后可以用同一个 ID 复查。
-- 用 `/bash-stop <task_id>` 停止已交接的命令。取消还未交接的 `bash` 则会停止该次命令。
-- 完整日志在当前 Pi 进程内保留。完成预览按需从日志生成。正常退出时，扩展停止受管任务并清理交接日志。
-- TUI 底部状态栏显示当前会话的后台任务和运行时长。任务结束后切换到 `result pending`，结果出现在对话里后清除。运行中和等待结果的任务合并在一组方括号里。
-- Fork 会继承历史中的工具消息。任务查询、停止和完成通知仍归启动命令的会话。
+- If a direct `bash_task` call returns the final result, Pi skips the separate completion message. The same ID remains available for later lookups.
+- Cancelling `bash` before handoff stops the command. After handoff, use `/bash-stop <task_id>`.
+- The current Pi process keeps full task logs and builds previews on demand. Normal exit stops managed tasks and removes handoff logs.
+- A fork inherits tool messages in the conversation history. Task lookup, stopping, and completion delivery stay with the session that started the command.
 
-## 已知边界
+## Compatibility
 
-- `pi -p` 和 `--mode json` 不交接，因此没有 `task_id`、`/bash-stop`、状态栏和完成通知。这些模式回答完就退出，宿主会终止受管任务，交接结果无人接收。
-- 在 Pi 1.6.0 中，`--tools` 使用普通名称列表时会过滤扩展工具的注册。显式列入 `bash_sync` 会同时把它声明给模型。使用 `--tools +codemode` 可保留默认分工。
-- 本扩展按混合模式设计，即 codemode 的 `on`。`only` 模式下 `bash` 和 `bash_task` 仍然直接声明给模型，因为 `only` 只隐藏 `direct` exposure 的工具。
+- One-shot print and JSON modes run in the foreground so the result can be returned before Pi exits.
+- In Pi 1.6.0, an explicit list such as `--tools bash,bash_task` filters extension registration. Explicitly listing `bash_sync` exposes it directly to the model as well. Use `--tools +codemode` to keep the default tool split.
+- In `only` mode, Pi hides tools with `direct` exposure. The extension's `model-only` tools, `bash` and `bash_task`, remain directly callable.
 
-## 开发
+## Development
 
 ```bash
 npm run check
 npm test
 ```
 
-测试使用 Pi 1.6.0、真实 Shell 和离线模型。RPC 测试保留事件记录，缓存回归保留 OpenAI 适配器生成的请求，`test/one-shot.test.mjs` 用真实 CLI 跑 `-p` 与 `--mode json`。测试输出会打印临时目录。
+Tests use Pi 1.6.0, real shell commands, and an offline model. The RPC tests save event traces, and the cache regression test saves requests serialized by the OpenAI adapter. `test/one-shot.test.mjs` runs the real CLI in print and JSON modes. Test output lists the temporary directories.
 
-- 改工具契约时读 [SPEC.md](SPEC.md)。改完成投递、提示词或日志时，先读 [T11 的维护要点](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md#维护要点)。
-- 改工具描述、`promptSnippet` 或 `promptGuidelines` 时读 [模型可见提示词的设计规则](PROMPT_DESIGN.md)，其中记录了分层和已固定措辞的理由。
-- 改 `exposure`、`--tools` 或工具可见性断言时读 [Pi 工具可见性](PI_TOOL_EXPOSURE.md)，其中有三种模式的实测声明形状和验证手法。
-- 调整交接或等待时长时，读[阈值样本与统计口径](THRESHOLD_ANALYSIS.md)。比较其他 Agent 的执行与提示设计时，读[异步 Shell 调研索引](.scratch/async-bash-research/README.md)。
-- [TICKETS.md](TICKETS.md) 记录历史实现与验收。动手前先读 [PROJECT_MEMORY.md](PROJECT_MEMORY.md)，其中有每轮决策的原因、已暂缓的问题和未验证边界。
+- For tool contracts, see [SPEC.md](SPEC.md). For completion delivery, prompts, or logging, start with [T11's maintenance notes](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md#维护要点).
+- For tool descriptions, `promptSnippet`, or `promptGuidelines`, see [model-visible prompt design](PROMPT_DESIGN.md) for the role and rationale of each layer.
+- For `exposure`, `--tools`, or visibility assertions, see [Pi tool visibility](PI_TOOL_EXPOSURE.md) for observed declarations in all three modes.
+- For handoff or wait thresholds, see [threshold measurements](THRESHOLD_ANALYSIS.md). For comparisons with other agents, see the [async shell research index](.scratch/async-bash-research/README.md).
+- [TICKETS.md](TICKETS.md) records implementation history and acceptance checks. Before changing the extension, read [PROJECT_MEMORY.md](PROJECT_MEMORY.md) for decision rationale, deferred issues, and verification limits.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "@runminton/pi-async-bash",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Automatic background handoff and completion notifications for Pi Bash commands.",
   "type": "module",
   "license": "MIT",
@@ -29,6 +29,7 @@
     "index.ts",
     "src",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "scripts": {
