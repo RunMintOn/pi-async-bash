@@ -31,7 +31,7 @@ export function installTaskStatus(ctx: ExtensionContext, manager: TaskManager): 
   let timer: ReturnType<typeof setInterval> | undefined;
   let last: string | undefined;
   const update = () => {
-    const text = backgroundStatus(tasks, Date.now(), Math.max(0, (process.stdout.columns ?? 80) - 3));
+    const text = backgroundStatus(tasks, performance.now(), Math.max(0, (process.stdout.columns ?? 80) - 3));
     if (text !== last) { ctx.ui.setStatus("async-bash", text); last = text; }
     if (tasks.length && !timer) timer = setInterval(update, 1000).unref();
     if (!tasks.length && timer) { clearInterval(timer); timer = undefined; }

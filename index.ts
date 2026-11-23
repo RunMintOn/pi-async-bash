@@ -9,6 +9,7 @@ const taskSchema = Type.Object({
   ...reference,
   status: Type.Union(["running", "exited", "timed_out", "stopped", "failed"].map(value => Type.Literal(value))),
   exit_code: Type.Optional(Type.Integer()),
+  wall_time_seconds: Type.Optional(Type.Number()),
   error: Type.Optional(Type.String()),
   log_error: Type.Optional(Type.String()),
   output_tail: Type.String(),
@@ -20,7 +21,8 @@ const taskSchema = Type.Object({
 
 function formatTask(task: TaskResult) {
   const status = task.status === "exited" ? `exited with code ${task.exit_code}` :
-    task.status === "timed_out" ? "timed out" : task.status;
+    task.status === "timed_out" ? "timed out" : task.status === "running" ? "is running" : task.status;
+  const duration = task.wall_time_seconds === undefined ? "" : ` (${Math.floor(task.wall_time_seconds)}s total)`;
   const log = `${task.log_error ? "Incomplete log" : "Log"}: ${task.log_path}`;
   const running = task.status === "running";
   const scope = task.log_error ? "Incomplete output" : running ? "Output so far" :
@@ -32,8 +34,9 @@ function formatTask(task: TaskResult) {
     task.end_line === 1 ? "1 line" : `${task.end_line} lines`;
   const preview = task.truncated && (running || task.log_error) ? ", preview truncated" : "";
   const heading = `${scope} (${lines}${preview})`;
-  return [`Bash task ${task.task_id}: ${status}.`, log, task.error, task.log_error, heading, task.output_tail]
+  const summary = [`Bash task ${task.task_id} ${status}${duration}`, log, task.error, task.log_error]
     .filter(Boolean).join("\n");
+  return `${summary}\n\n${heading}${task.output_tail ? `\n\n${task.output_tail}` : ""}`;
 }
 
 function completion(task: TaskResult) {
@@ -140,7 +143,7 @@ export default function asyncBash(pi: ExtensionAPI) {
     name: "bash_task",
     label: "bash task",
     exposure: "model-only",
-    description: "Inspect or wait on the handed-off Bash task identified by task_id. Returns its status, exit code when available, log path, and a preview of up to 40 lines and 4 KiB with original line numbers. An already finished task returns immediately. Reaching the wait limit or cancelling the wait leaves the command running. If this call delivers the final result directly to the model, Pi skips the separate completion message.",
+    description: "Inspect or wait on the handed-off Bash task identified by task_id. Returns its status, exit code when available, log path, and a preview of up to 40 lines and 4 KiB with original line numbers. A finished task returns immediately and includes the command's total runtime. Reaching the wait limit or cancelling the wait leaves the command running. If this call delivers the final result directly to the model, Pi skips the separate completion message.",
     promptSnippet: "Inspect a handed-off Bash task or wait on it",
     promptGuidelines: [
       "Do not poll handed-off Bash tasks for completion by sleeping, repeatedly reading logs, or repeatedly calling bash_task. Pi already tracks completion. A sleep call can keep you waiting even after the command has finished.",

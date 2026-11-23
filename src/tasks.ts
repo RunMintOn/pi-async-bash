@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { closeSync, createWriteStream, mkdtempSync, openSync, readSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ export interface Handoff {
 export interface TaskResult extends Omit<Handoff, "status"> {
   status: "running" | "exited" | "timed_out" | "stopped" | "failed";
   exit_code?: number;
+  wall_time_seconds?: number;
   error?: string;
   log_error?: string;
   output_tail: string;
@@ -38,7 +39,7 @@ interface Task {
   newlines: number;
   lastByte?: number;
   done: Promise<void>;
-  final?: Pick<TaskResult, "status" | "exit_code" | "error" | "log_error">;
+  final?: Pick<TaskResult, "status" | "exit_code" | "error" | "log_error"> & { wall_time_seconds: number };
 }
 
 interface Execution {
@@ -134,13 +135,14 @@ export class TaskManager {
     owner: string, signal: AbortSignal | undefined, run: (execution: Execution) => Promise<T>,
   ): Promise<T | Handoff> {
     this.directory ??= mkdtempSync(join(tmpdir(), "pi-async-bash-"));
-    const task_id = randomUUID();
+    let task_id: string;
+    do { task_id = randomBytes(3).toString("hex"); } while (this.tasks.has(task_id));
     const log_path = join(this.directory, `${task_id}.log`);
     const fd = openSync(log_path, "wx", 0o600);
     const stream = createWriteStream(log_path, { fd });
     const controller = new AbortController();
     const task: Task = {
-      ref: { status: "running", task_id, log_path }, owner, started_at: Date.now(),
+      ref: { status: "running", task_id, log_path }, owner, started_at: performance.now(),
       controller, handed: false, delivered: false, bytes: 0, newlines: 0,
       done: Promise.resolve(),
     };
@@ -161,11 +163,12 @@ export class TaskManager {
     const execution = (async () => {
       let exit_code: number | undefined;
       let outcome: { result: T } | { error: unknown };
+      let wall_time_seconds: number;
       try {
         const result = await run({
           signal: controller.signal,
           start: timeout => {
-            task.started_at = Date.now();
+            task.started_at = performance.now();
             if (timeout === undefined || timeout * 1000 > this.initialWaitMs) {
               timer = setTimeout(handoff, this.initialWaitMs, "handoff");
             }
@@ -187,16 +190,20 @@ export class TaskManager {
       } catch (error) {
         outcome = { error };
       } finally {
+        wall_time_seconds = (performance.now() - task.started_at) / 1000;
         clearTimeout(timer);
         stream.end();
         await logFinished;
       }
       if (task.handed) {
-        task.final = logError ? { status: "failed", log_error: logError } :
-          "result" in outcome ? { status: "exited", exit_code } :
-          timedOut ? { status: "timed_out" } :
-          controller.signal.aborted ? { status: "stopped" } :
-          { status: "failed", error: (outcome.error as Error).message };
+        task.final = {
+          wall_time_seconds,
+          ...(logError ? { status: "failed", log_error: logError } :
+            "result" in outcome ? { status: "exited", exit_code } :
+            timedOut ? { status: "timed_out" } :
+            controller.signal.aborted ? { status: "stopped" } :
+            { status: "failed", error: (outcome.error as Error).message }),
+        };
         this.changed();
       } else {
         unlinkSync(log_path);

@@ -22,11 +22,11 @@ bash({ command: "npm test", timeout: 120 })
 `pi -p` 和 `pi --mode json` 会在回答后退出。这两个模式下，`bash` 在前台等到命令完成、超时或取消，再交回结果。
 
 ```typescript
-bash_task({ task_id: "...", wait_seconds: 5 })
-bash_task({ task_id: "...", wait_seconds: 0 })
+bash_task({ task_id: "650e2e", wait_seconds: 5 })
+bash_task({ task_id: "650e2e", wait_seconds: 0 })
 ```
 
-`bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。
+`task_id` 是 6 位十六进制 ID，也可传给 `/bash-stop`。`bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。最终结果和自动完成通知都显示命令从启动到结束的总耗时。
 
 每次查看返回状态和日志末尾，最多 40 行、4 KiB。查看结果和完成通知会标明输出范围。有截断时，可以用日志路径和 `read` 的 `offset` 查看更早的内容。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
 

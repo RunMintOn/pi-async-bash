@@ -31,6 +31,8 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
       const { name } = specs[i];
       assert.deepEqual(Object.keys(start.details).sort(), ["log_path", "status", "task_id"]);
       assert.equal(start.details.status, "running");
+      assert.match(start.details.task_id, /^[0-9a-f]{6}$/);
+      assert.ok(start.details.log_path.endsWith(`/${start.details.task_id}.log`));
       assert.equal(readFileSync(start.details.log_path, "utf8"), `${name}:start\n`);
       return [name, { ...specs[i], ...start.details }];
     }));
@@ -59,7 +61,10 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     assert.equal(final.isError, true);
     assert.equal(final.details.exit_code, 7);
     assert.equal(final.details.output_tail, "waited:start\nwaited:fail");
-    assert.match(textOf(final), /^Complete output \(2 lines\)$/m);
+    assert.ok(final.details.wall_time_seconds >= 30);
+    assert.equal(textOf(final),
+      `Bash task ${refs.waited.task_id} exited with code 7 (${Math.floor(final.details.wall_time_seconds)}s total)\n` +
+      `Log: ${refs.waited.log_path}\n\nComplete output (2 lines)\n\nwaited:start\nwaited:fail`);
     assert.equal(readFileSync(refs.waited.log_path, "utf8"), final.details.output_tail);
     assert.equal(completions((await rpc.send("get_messages")).messages).length, 0);
 
@@ -111,11 +116,16 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
 
     delivered = notification(refs.stopped.task_id);
     await rpc.send("prompt", { message: "/bash-stop " + refs.stopped.task_id });
-    assert.equal((await delivered).message.details.status, "stopped");
+    const stoppedNotice = (await delivered).message;
+    assert.equal(stoppedNotice.details.status, "stopped");
     await rpc.wait(e => e.type === "agent_settled", rpc.events.findLastIndex(e =>
       e.type === "message_end" && e.message.details?.task_id === refs.stopped.task_id));
+    assert.match((await rpc.send("get_last_assistant_text")).text, /stopped \(\d+s total\)/);
     const stopped = await rpc.call("bash_task", { task_id: refs.stopped.task_id, wait_seconds: 0 });
     assert.equal(stopped.details.status, "stopped");
+    assert.ok(stoppedNotice.details.wall_time_seconds >= 30);
+    assert.equal(stopped.details.wall_time_seconds, stoppedNotice.details.wall_time_seconds);
+    assert.equal(textOf(stopped), textOf(stoppedNotice));
     const timedOut = await rpc.call("bash_task", { task_id: refs.timeout.task_id });
     assert.equal(timedOut.details.status, "timed_out");
     assert.equal(timedOut.details.output_tail, "timeout:start\n");
