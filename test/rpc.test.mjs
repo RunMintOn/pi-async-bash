@@ -25,6 +25,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     }))));
     const owner = (await rpc.send("get_state")).sessionFile;
     assert.equal(starts.length, specs.length);
+    assert.match(textOf(starts[0]), /Pi will deliver the final result to this conversation automatically\. Continue independent work, or end your turn to wait\./);
     const refs = Object.fromEntries(starts.map((start, i) => {
       const { name } = specs[i];
       assert.deepEqual(Object.keys(start.details).sort(), ["log_path", "status", "task_id"]);
@@ -36,6 +37,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     const snapshot = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 0.02 });
     assert.equal(snapshot.details.status, "running");
     assert.equal(snapshot.details.output_tail, "waited:start\n");
+    assert.doesNotMatch(textOf(snapshot), /end your turn/);
     const oversized = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 301 });
     assert.equal(oversized.isError, true);
     const nested = await rpc.call("codemode", {

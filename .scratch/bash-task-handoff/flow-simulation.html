@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>async-bash 消息流模拟</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --panel:#ffffff; --ink:#1b1a18; --muted:#726d64; --rule:#e6e2da;
+    --user:#2f5fd0; --assistant:#4a4741; --call:#7a4bd0; --result:#0d7a58; --notify:#a96400;
+    --code-bg:#f5f3ee; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#131312; --panel:#1b1b19; --ink:#ebe8e2; --muted:#948f86; --rule:#2e2d2a;
+      --user:#84a9f8; --assistant:#b9b4ac; --call:#b58df2; --result:#54d2ab; --notify:#e2a951;
+      --code-bg:#20201d;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:15px/1.68 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell{max-width:900px;margin:0 auto;padding:56px 28px 120px}
+
+  header{border-bottom:1px solid var(--rule);padding-bottom:28px;margin-bottom:8px}
+  h1{font-size:21px;font-weight:650;letter-spacing:-.01em;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:13.5px;margin:0}
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .legend span{
+    display:inline-flex;align-items:center;gap:7px;
+    font-size:12.5px;color:var(--muted);
+    border:1px solid var(--rule);border-radius:999px;padding:4px 11px;background:var(--panel);
+  }
+  .dot{width:7px;height:7px;border-radius:50%}
+
+  .thread{margin-top:34px}
+  .step{display:grid;grid-template-columns:76px minmax(0,1fr);gap:0 20px}
+  .time{
+    font:11.5px/1.5 var(--mono);color:var(--muted);
+    padding-top:17px;text-align:right;white-space:nowrap;
+    font-variant-numeric:tabular-nums;
+  }
+  .slot{position:relative;padding:12px 0 12px 22px;border-left:1px solid var(--rule)}
+  .slot::before{
+    content:"";position:absolute;left:-3.5px;top:22px;
+    width:6px;height:6px;border-radius:50%;background:var(--rule);
+  }
+
+  .block{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:14px 16px 15px}
+  .block.user{border-left:3px solid var(--user)}
+  .block.assistant{border-left:3px solid var(--assistant)}
+  .block.call{border-left:3px solid var(--call)}
+  .block.result{border-left:3px solid var(--result)}
+  .block.notify{border-left:3px solid var(--notify);border-style:dashed;border-left-style:solid;background:transparent}
+  .slot:has(.user)::before{background:var(--user)}
+  .slot:has(.call)::before{background:var(--call)}
+  .slot:has(.result)::before{background:var(--result)}
+  .slot:has(.notify)::before{background:var(--notify)}
+
+  .who{
+    display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+    font-size:12px;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--muted);margin-bottom:8px;
+  }
+  .who .name{font:12.5px var(--mono);letter-spacing:0;text-transform:none;color:var(--ink)}
+  .block p{margin:0;font-size:15px}
+  .block p + p{margin-top:8px}
+
+  .chip{
+    font:11px/1 var(--mono);letter-spacing:0;text-transform:none;
+    padding:3px 7px;border-radius:5px;border:1px solid currentColor;
+    color:var(--muted);opacity:.95;
+  }
+  .chip.running{color:var(--notify)}
+  .chip.ok{color:var(--result)}
+  .chip.bad{color:#c0392b}
+  @media (prefers-color-scheme:dark){ .chip.bad{color:#f07a6c} }
+
+  pre.code{
+    margin:10px 0 0;padding:11px 13px;background:var(--code-bg);
+    border-radius:7px;overflow-x:auto;
+    font:12.5px/1.62 var(--mono);color:var(--ink);
+    white-space:pre;tab-size:2;
+  }
+  .k{color:var(--call)} .s{color:var(--result)} .n{color:var(--notify)}
+  .c{color:var(--muted)} .bad{color:#c0392b}
+  @media (prefers-color-scheme:dark){ .bad{color:#f07a6c} }
+  .dim{color:var(--muted)}
+
+  .meta{
+    display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;
+    font:11.5px var(--mono);color:var(--muted);
+  }
+  .meta b{font-weight:500;color:var(--ink)}
+
+  .gap{
+    display:flex;align-items:center;gap:14px;
+    margin:14px 0 14px 76px;color:var(--muted);font-size:12px;
+  }
+  .gap::before,.gap::after{content:"";height:1px;background:var(--rule);flex:1}
+  .gap span{white-space:nowrap}
+
+  .prompts{margin-top:60px;border-top:1px solid var(--rule);padding-top:30px}
+  .prompts h2{font-size:17px;font-weight:650;letter-spacing:-.01em;margin:0 0 6px}
+  .prompts > .note{color:var(--muted);font-size:13px;margin:0 0 24px}
+  .pcard{border:1px solid var(--rule);border-radius:10px;background:var(--panel);margin-bottom:14px;overflow:hidden}
+  .pcard > .head{
+    display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:11px 16px;border-bottom:1px solid var(--rule);background:var(--code-bg);
+  }
+  .pcard .head .t{font-size:13px;font-weight:600;color:var(--ink)}
+  .pcard .head .loc{font:11.5px var(--mono);color:var(--muted)}
+  .pcard .body{padding:14px 16px 15px}
+  .en{font:12.5px/1.66 var(--mono);white-space:pre-wrap;word-break:break-word;margin:0;color:var(--ink)}
+  .zh{font-size:13px;line-height:1.7;color:var(--muted);margin:6px 0 0}
+  .row + .row{margin-top:15px;padding-top:15px;border-top:1px dashed var(--rule)}
+  .prompts code{font:12px var(--mono);background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .tag{
+    display:inline-block;font:10.5px/1 var(--mono);padding:2px 6px;border-radius:4px;
+    border:1px solid var(--rule);color:var(--muted);margin-right:8px;vertical-align:1px;
+  }
+
+  footer{margin-top:52px;padding-top:22px;border-top:1px solid var(--rule);color:var(--muted);font-size:12.5px}
+  footer p{margin:0 0 8px}
+  footer code{font:12px var(--mono);background:var(--code-bg);padding:1px 5px;border-radius:4px}
+
+  @media (max-width:620px){
+    .shell{padding:36px 16px 80px}
+    .step{grid-template-columns:1fr;gap:0}
+    .time{text-align:left;padding:10px 0 0 0}
+    .slot{padding-left:16px}
+    .gap{margin-left:0}
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <h1>async-bash 一次完整对话的消息流</h1>
+  <p class="sub">按时间顺序模拟，Pi 1.6.0 · 30 秒交接 · 预览 40 行 / 4 KiB</p>
+  <div class="legend">
+    <span><i class="dot" style="background:var(--user)"></i>用户消息</span>
+    <span><i class="dot" style="background:var(--assistant)"></i>模型回答</span>
+    <span><i class="dot" style="background:var(--call)"></i>工具调用</span>
+    <span><i class="dot" style="background:var(--result)"></i>工具返回</span>
+    <span><i class="dot" style="background:var(--notify)"></i>完成通知（custom message）</span>
+  </div>
+</header>
+
+<div class="thread">
+
+  <!-- 场景一：短命令 -->
+  <div class="step">
+    <div class="time">09:41:02</div>
+    <div class="slot">
+      <div class="block user">
+        <div class="who">用户</div>
+        <p>先看下现在在哪个分支。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:03</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>查一下。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:04</div>
+    <div class="slot">
+      <div class="block call">
+        <div class="who">工具调用 <span class="name">bash</span></div>
+        <pre class="code">{
+  <span class="k">"command"</span>: <span class="s">"git branch --show-current"</span>
+}</pre>
+        <div class="meta"><span>未传 timeout</span><span>cwd 继承 Pi 当前目录</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:04</div>
+    <div class="slot">
+      <div class="block result">
+        <div class="who">工具返回 <span class="name">bash</span> <span class="chip ok">exited 0</span></div>
+        <pre class="code">experiment/bash-task-handoff</pre>
+        <div class="meta"><span>本次耗时 <b>0.02s</b></span><span>日志已删除</span><span>没有 task_id</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap"><span>30 秒内结束，走原生路径，不产生任务</span></div>
+
+  <!-- 场景二：交接 + 空闲唤醒 -->
+  <div class="step">
+    <div class="time">09:41:20</div>
+    <div class="slot">
+      <div class="block user">
+        <div class="who">用户</div>
+        <p>把完整测试跑一遍，挂了要告诉我具体是哪两个用例。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:21</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>开始跑。命令自带 300 秒执行上限，如果 30 秒还没结束，它会先交接出去。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:22</div>
+    <div class="slot">
+      <div class="block call">
+        <div class="who">工具调用 <span class="name">bash</span></div>
+        <pre class="code">{
+  <span class="k">"command"</span>: <span class="s">"npm test"</span>,
+  <span class="k">"timeout"</span>: <span class="n">300</span>
+}</pre>
+        <div class="meta"><span>timeout 300s &gt; 30s，因此装配交接定时器</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:52</div>
+    <div class="slot">
+      <div class="block result">
+        <div class="who">工具返回 <span class="name">bash</span> <span class="chip running">running</span></div>
+        <pre class="code">Bash task 7c4e1a08 is still running.
+Log: /tmp/pi-async-bash-Nq3x0/7c4e1a08.log
+Pi will deliver the final result to this conversation automatically. Continue independent work, or end your turn to wait.</pre>
+        <div class="meta"><span>第 <b>30.0s</b> 交接</span><span>进程继续，timeout 仍在计时</span><span>日志从第 1 秒就在写</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:41:54</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>测试留在后台跑。这一轮没有别的能先做的事，我先结束，跑完会自动回到这个会话。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap"><span>这一轮结束 · 会话空闲 · 后台进程继续写入了 1184 行日志</span></div>
+
+  <div class="step">
+    <div class="time">09:43:47</div>
+    <div class="slot">
+      <div class="block notify">
+        <div class="who">完成通知 <span class="chip running">自动唤醒</span> <span class="name">custom message</span></div>
+        <pre class="code">Bash task 7c4e1a08: exited with code 1.
+Log: /tmp/pi-async-bash-Nq3x0/7c4e1a08.log
+Showing lines 1184–1223 (preview truncated)
+
+<span class="bad">FAIL</span> test/cache-prefix.test.mjs &gt; idle wake keeps the system prompt stable
+  AssertionError: expected tools[0].description to be unchanged
+<span class="bad">FAIL</span> test/cache-prefix.test.mjs &gt; busy completion appends without rewriting
+  AssertionError: expected 3 messages, got 4
+
+ℹ tests 20
+ℹ <span class="s">pass 18</span>
+ℹ <span class="bad">fail 2</span>
+ℹ duration_ms 75340</pre>
+        <div class="meta"><span>追加到历史末尾，不改动已有前缀</span><span>触发新一轮模型调用</span><span>40 行 / 4 KiB 上限</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:43:50</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>两个失败都在 cache-prefix。分别是空闲唤醒时工具描述被改写，和忙碌投递多了一条消息。先看断言的具体位置。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:43:52</div>
+    <div class="slot">
+      <div class="block call">
+        <div class="who">工具调用 <span class="name">bash</span></div>
+        <pre class="code">{
+  <span class="k">"command"</span>: <span class="s">"rg -n 'tools\\[0\\]' test/cache-prefix.test.mjs"</span>
+}</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:43:53</div>
+    <div class="slot">
+      <div class="block result">
+        <div class="who">工具返回 <span class="name">bash</span> <span class="chip ok">exited 0</span></div>
+        <pre class="code">41:  assert.equal(tools[0].description, baseline.tools[0].description)
+68:  assert.equal(tools[0].description, baseline.tools[0].description)
+97:  assert.equal(tools[0].description, baseline.tools[0].description)</pre>
+        <div class="meta"><span>耗时 <b>0.04s</b></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap"><span>接下来是用户明确要求等待一次的路径</span></div>
+
+  <!-- 场景三：主动等待 -->
+  <div class="step">
+    <div class="time">09:44:10</div>
+    <div class="slot">
+      <div class="block user">
+        <div class="who">用户</div>
+        <p>改完再跑一次。交接后请用一次工具调用再等最多 30 秒，之后等自动通知。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:44:12</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>交接后我会用 bash_task 等一次，最多 30 秒。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:44:13</div>
+    <div class="slot">
+      <div class="block call">
+        <div class="who">工具调用 <span class="name">bash</span></div>
+        <pre class="code">{
+  <span class="k">"command"</span>: <span class="s">"npm test"</span>
+}</pre>
+        <div class="meta"><span>不传 timeout，命令没有执行上限</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:44:43</div>
+    <div class="slot">
+      <div class="block result">
+        <div class="who">工具返回 <span class="name">bash</span> <span class="chip running">running</span></div>
+        <pre class="code">Bash task a5b20f31 is still running.
+Log: /tmp/pi-async-bash-Nq3x0/a5b20f31.log
+Pi will deliver the final result to this conversation automatically. Continue independent work, or end your turn to wait.</pre>
+        <div class="meta"><span>第 <b>30.0s</b> 交接</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:44:45</div>
+    <div class="slot">
+      <div class="block call">
+        <div class="who">工具调用 <span class="name">bash_task</span></div>
+        <pre class="code">{
+  <span class="k">"task_id"</span>: <span class="s">"a5b20f31"</span>,
+  <span class="k">"wait_seconds"</span>: <span class="n">30</span>
+}</pre>
+        <div class="meta"><span>这次调用会阻塞，直到命令结束或等满 30 秒</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:45:15</div>
+    <div class="slot">
+      <div class="block result">
+        <div class="who">工具返回 <span class="name">bash_task</span> <span class="chip running">running</span></div>
+        <pre class="code">Bash task a5b20f31: running.
+Log: /tmp/pi-async-bash-Nq3x0/a5b20f31.log
+Showing lines 1120–1159 (preview truncated)
+
+<span class="c">…</span>
+ ✔ preview reports original line numbers (8ms)
+ ✔ the byte limit keeps whole lines (13ms)
+ ✔ empty and exact-limit logs (12ms)</pre>
+        <div class="meta"><span>等满 <b>30s</b> 到期</span><span>命令继续跑</span><span>只给预览，不消耗日志</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:45:17</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>又等了 30 秒，测试还在运行。结果出来后会自动回到这个会话。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:45:29</div>
+    <div class="slot">
+      <div class="block notify">
+        <div class="who">完成通知 <span class="chip running">自动唤醒</span> <span class="name">custom message</span></div>
+        <pre class="code">Bash task a5b20f31: exited with code 0.
+Log: /tmp/pi-async-bash-Nq3x0/a5b20f31.log
+Showing lines 1156–1195 (preview truncated)
+
+ℹ tests 20
+ℹ <span class="s">pass 20</span>
+ℹ fail 0
+ℹ duration_ms 75540</pre>
+        <div class="meta"><span>测试结束后，Pi 把结果送回原会话</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="time">09:45:31</div>
+    <div class="slot">
+      <div class="block assistant">
+        <div class="who">模型回答</div>
+        <p>20 个全部通过，失败的两个用例已经修好。</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<section class="prompts">
+  <h2>模型实际看到的提示词</h2>
+  <p class="note">这套工具对模型暴露四类文本。系统提示词里的清单和规则、请求体里的工具定义，以及交接和完成时送回的文本。每段英文下面是对应的中文。</p>
+
+  <div class="pcard">
+    <div class="head"><span class="t">① 系统提示词 · 工具清单</span><span class="loc">system prompt → section: tools</span></div>
+    <div class="body">
+      <p class="en">- bash: Run Bash commands with background handoff for long-running commands
+- bash_task: Inspect a handed-off Bash task or wait on it</p>
+      <p class="zh">每个工具一行。没有 snippet 的工具根本不会出现在这个清单里，所以 snippet 写不好，模型可能压根不知道有这个工具。</p>
+      <p class="zh">第一行，运行 Bash 命令，长命令会交接到后台。<br>第二行，查看或等待已交接的 Bash 任务。</p>
+    </div>
+  </div>
+
+  <div class="pcard">
+    <div class="head"><span class="t">② 系统提示词 · 规则</span><span class="loc">system prompt → section: rules</span></div>
+    <div class="body">
+      <div class="row">
+        <p class="en">- You can inspect PI_* environment variables for current model and session details.</p>
+        <p class="zh">来自原生 bash，保留了。你可以查看 PI_* 环境变量，获取当前模型和会话的信息。</p>
+      </div>
+      <div class="row">
+        <p class="en">- When bash hands off a command, running means the original command is still executing. Pi tracks it and automatically delivers the final result to this conversation. Continue work that can proceed without it. If all remaining work depends on the result, end your turn; Pi will resume the conversation when the result is ready. Do not rerun the command just to get its result, since that can repeat its side effects.</p>
+        <p class="zh">bash 交接后，running 表示原命令仍在执行。Pi 会跟踪它，把最终结果自动送回本会话。继续做能独立推进的工作。如果剩余工作都依赖结果，就结束本轮。结果就绪时 Pi 会接续本会话。仅为取得结果而重跑可能重复命令的副作用。</p>
+      </div>
+      <div class="row">
+        <p class="en">- Do not poll handed-off Bash tasks for completion by sleeping, repeatedly reading logs, or repeatedly calling bash_task. Pi already tracks completion. A sleep call can keep you waiting even after the command has finished.</p>
+        <p class="zh">为确认已交接任务是否结束，无需调用 sleep、反复读日志或反复调用 bash_task。Pi 已经在跟踪完成状态。sleep 可能让你在命令结束后还要继续等。</p>
+      </div>
+      <div class="row">
+        <p class="en">- Use bash_task with wait_seconds: 0 if output already produced can inform an action now, or if the user asks for progress. If the user explicitly asks to block on an existing task, make one bounded bash_task call with an explicit wait_seconds. If it returns running, leave completion to Pi.</p>
+        <p class="zh">已有输出能帮助决定眼下的动作，或用户询问进度时，用 bash_task 并传 wait_seconds: 0。用户明确要求阻塞等待已有任务时，调用一次 bash_task，并明确填写等多久。若仍在运行，等 Pi 自动送达结果。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pcard">
+    <div class="head"><span class="t">③ 工具定义 · bash</span><span class="loc">请求体 tools[].description + parameters</span></div>
+    <div class="body">
+      <p class="en">Run a Bash command in the current working directory. If it finishes before handoff, return its stdout and stderr. The text result keeps at most the last 2,000 lines or 50 KiB, whichever limit is reached first. If truncated, the full output is saved to a temporary file. If the command is still running after 30 seconds, hand it off and return status: running, task_id, and log_path. The same command keeps running, and Pi delivers its final result to the original conversation automatically.</p>
+      <p class="zh">在当前工作目录运行 Bash 命令。交接前完成时返回 stdout 和 stderr。文本结果至多保留最后 2,000 行或 50 KiB，以先触及的上限为准。若发生截断，完整输出存在临时文件里。命令过了 30 秒还在运行时，交接并返回 status: running、task_id 和 log_path。原命令继续运行，Pi 会把最终结果自动送回原会话。</p>
+      <div class="row">
+        <p class="en"><span class="tag">必填</span>command: string — Shell command to execute.</p>
+        <p class="zh">要执行的 shell 命令。</p>
+      </div>
+      <div class="row">
+        <p class="en"><span class="tag">可选</span>timeout: number — Maximum command runtime in seconds, including after handoff. Reaching this limit terminates the command. Omit for no timeout.</p>
+        <p class="zh">命令总运行时限，单位为秒，包含交接后的时间。达到时限会终止命令。省略表示不设时限。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pcard">
+    <div class="head"><span class="t">④ 工具定义 · bash_task</span><span class="loc">请求体 tools[].description + parameters</span></div>
+    <div class="body">
+      <p class="en">Inspect or wait on the handed-off Bash task identified by task_id. Returns its status, exit code when available, log path, and a preview of up to 40 lines and 4 KiB with original line numbers. An already finished task returns immediately. Reaching the wait limit or cancelling the wait leaves the command running. If this call delivers the final result directly to the model, Pi skips the separate completion message.</p>
+      <p class="zh">按 task_id 查看或等待已交接的 Bash 任务。返回状态、可用时的退出码、日志路径，以及带原始行号的预览，上限为 40 行和 4 KiB。已结束的任务立即返回。达到等待上限或取消等待时，命令继续运行。如果这次调用已把最终结果直接交给模型，Pi 会省去单独的完成消息。</p>
+      <div class="row">
+        <p class="en"><span class="tag">必填</span>task_id: string — Task ID returned by bash at handoff.</p>
+        <p class="zh">bash 交接时返回的任务编号。</p>
+      </div>
+      <div class="row">
+        <p class="en"><span class="tag">可选</span>wait_seconds: number — Maximum time this call waits for the task to finish, in seconds. Use 0 for an immediate snapshot. Accepts 0 to 300. Defaults to 30.</p>
+        <p class="zh">最长等待秒数，0 到 300，默认 30。传 0 表示立刻看一眼，不等。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pcard">
+    <div class="head"><span class="t">⑤ 交接回执与完成通知</span><span class="loc">tool result · custom message</span></div>
+    <div class="body">
+      <p class="en">Bash task &lt;task_id&gt; is still running.
+Log: &lt;log_path&gt;
+Pi will deliver the final result to this conversation automatically. Continue independent work, or end your turn to wait.</p>
+      <p class="zh">交接时，回执给出运行状态和日志路径。Pi 会把最终结果自动送回本会话。可以继续独立工作，或结束本轮等待。</p>
+      <p class="en">Bash task &lt;task_id&gt;: exited with code 1.
+Log: &lt;log_path&gt;
+Showing lines 1184–1223 (preview truncated)
+&lt;最后 40 行或 4 KiB 原始输出&gt;</p>
+      <p class="zh">第一行是状态，退出码非零就写实际的数字，超时写 timed out，被停写 stopped。第二行是完整日志路径。第三行只在有预览时出现，括号里表示前面还有内容没给。最后是该任务的输出尾部。</p>
+      <p class="zh">这段文本和 bash_task 成功返回时用的是同一个格式化函数，所以模型看到的形态一致。</p>
+    </div>
+  </div>
+
+  <div class="pcard">
+    <div class="head"><span class="t">不计入提示词的部分</span><span class="loc">模型看不到</span></div>
+    <div class="body">
+      <p class="zh">label（bash task）只用于 TUI 显示。outputSchema 不进提示词文本，它是给 provider 做结构化输出约束用的。<code>/bash-stop</code> 是用户斜杠命令，模型没有这个工具。</p>
+      <p class="zh">页面上面那段对话里的时间、task_id 和日志路径都是示例值。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>短命令在 30 秒内结束，走原生路径返回，日志立刻删除，不产生 task_id。超过 30 秒才产生任务。</p>
+  <p>命令是否结束和日志读到哪，是两件独立的事。预览每次都是日志末尾，重复看会看到相同内容，因为日志没有被「消费」这个概念。</p>
+  <p>完成通知以 custom message 形式出现，位置在历史末尾，前面的消息、系统提示和工具定义都不变，这是缓存前缀能稳住的原因。</p>
+  <p>页面里的 task_id、时间、日志路径都是示例值，用于说明交互顺序。</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -3,6 +3,7 @@
 ## T11 — 长命令交接、有限等待与原会话自动接续
 
 - 已实现。见[本地规格](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md)。以 Pi 1.6.0 验收，20 个测试通过，包括真实 RPC 用户旅程和 OpenAI 适配器请求前缀回归。
+- 提示词按分层重写：`running` 是正常状态、`sleep` 会推迟看到已就绪的结果、查进度用 `wait_seconds: 0`、阻塞只在用户明确要求时。A/B/C 三稿、理由与被否掉的 `handoff: false` 方案见 [PROMPT_DESIGN.md](PROMPT_DESIGN.md)。
 
 ## T10 — 方案 A：接口收紧、原生复用与模型说明
 

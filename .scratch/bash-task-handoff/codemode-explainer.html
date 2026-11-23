@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Mode 是什么，以及我们会遇到什么</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --panel:#fff; --ink:#1b1a18; --muted:#726d64; --rule:#e6e2da;
+    --call:#7a4bd0; --result:#0d7a58; --notify:#a96400; --bad:#c0392b; --barrier:#3f6fd8;
+    --code-bg:#f5f3ee; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#131312; --panel:#1b1b19; --ink:#ebe8e2; --muted:#948f86; --rule:#2e2d2a;
+      --call:#b58df2; --result:#54d2ab; --notify:#e2a951; --bad:#f07a6c; --barrier:#7aa2f7;
+      --code-bg:#20201d;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg);color:var(--ink);
+    font:15px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell{max-width:900px;margin:0 auto;padding:56px 26px 120px}
+  h1{font-size:23px;line-height:1.35;letter-spacing:-.01em;margin:0 0 10px;font-weight:650}
+  .lead{font-size:15.5px;color:var(--muted);margin:0}
+  header{border-bottom:1px solid var(--rule);padding-bottom:26px;margin-bottom:8px}
+
+  section{margin-top:52px}
+  h2{font-size:16.5px;font-weight:650;letter-spacing:-.01em;margin:0 0 4px}
+  h2 .idx{color:var(--muted);font-weight:400;margin-right:9px}
+  .sub{color:var(--muted);font-size:13.5px;margin:0 0 20px}
+
+  p{margin:0 0 12px}
+  strong{font-weight:650}
+  code{font:12.5px var(--mono);background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre.code{
+    margin:0;padding:12px 14px;background:var(--code-bg);border-radius:8px;
+    overflow-x:auto;font:12.5px/1.66 var(--mono);white-space:pre;tab-size:2;
+  }
+  .k{color:var(--call)} .s{color:var(--result)} .n{color:var(--notify)} .c{color:var(--muted)}
+  .err{color:var(--bad)}
+
+  /* 两种入口 */
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:700px){ .two{grid-template-columns:1fr} }
+  .way{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:15px 16px}
+  .way h3{font-size:13.5px;margin:0 0 12px;font-weight:650}
+  .way h3 span{font:11.5px var(--mono);color:var(--muted);margin-left:6px}
+  .chain{display:flex;flex-direction:column;gap:7px;font-size:12.5px}
+  .chain div{
+    border:1px solid var(--rule);border-radius:6px;padding:6px 10px;
+    font:12px var(--mono);background:var(--bg);
+  }
+  .chain .arrow{align-self:center;border:0;background:none;color:var(--muted);padding:0;font-size:13px}
+  .chain .hi{border-color:var(--call);color:var(--call)}
+  .chain .out{border-color:var(--result);color:var(--result)}
+
+  /* 屏障 */
+  .sandbox{border:1px solid var(--barrier);border-radius:10px;overflow:hidden;margin-top:8px}
+  .sandbox .top{background:var(--barrier);color:#fff;font-size:12px;letter-spacing:.03em;padding:6px 14px;opacity:.92}
+  .sandbox .in{padding:16px;background:var(--panel)}
+  .sandbox .in p{margin:0 0 12px;font-size:13.5px;color:var(--muted)}
+  .sandbox .in p:last-child{margin-bottom:0}
+  .sandbox .exit{
+    margin-top:14px;border-top:1px dashed var(--barrier);padding-top:12px;
+    font-size:13.5px;
+  }
+  .sandbox .exit b{color:var(--result)}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:6px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-size:12px;color:var(--muted);font-weight:500;letter-spacing:.02em}
+  td:first-child{width:30%}
+  tr:last-child td{border-bottom:0}
+  td code{font-size:12px}
+
+  /* 场景卡 */
+  .scn{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:16px 17px 17px;margin-bottom:13px}
+  .scn.ok{border-left:3px solid var(--result)}
+  .scn.warn{border-left:3px solid var(--notify)}
+  .scn.bad{border-left:3px solid var(--bad)}
+  .scn > header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:0;border:0}
+  .scn h3{font-size:14.5px;font-weight:650;margin:0}
+  .num{
+    font:11px var(--mono);color:var(--muted);border:1px solid var(--rule);
+    border-radius:4px;padding:2px 6px;line-height:1.4;
+  }
+  .verdict{font:11px var(--mono);padding:2px 7px;border:1px solid currentColor;border-radius:4px;margin-left:auto}
+  .verdict.ok{color:var(--result)} .verdict.warn{color:var(--notify)} .verdict.bad{color:var(--bad)}
+  .scn p{font-size:13.5px;margin:11px 0 0}
+  .scn p:first-of-type{margin-top:12px}
+  .scn .why{color:var(--muted)}
+  .scn .why b{color:var(--ink);font-weight:600}
+  .scn ul{margin:10px 0 0;padding-left:19px;font-size:13.5px;color:var(--muted)}
+  .scn li{margin:4px 0}
+  .scn li b{color:var(--ink);font-weight:600}
+
+  /* 迷你时间线 */
+  .tl{margin-top:14px;border-top:1px dashed var(--rule);padding-top:12px}
+  .tl-row{display:grid;grid-template-columns:58px minmax(0,1fr);gap:10px;align-items:center;margin-bottom:7px}
+  .tl-row > span{font:11px var(--mono);color:var(--muted);text-align:right}
+  .tl-track{position:relative;height:20px;background:var(--code-bg);border-radius:4px;overflow:hidden}
+  .tl-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;opacity:.3}
+  .tl-fill.alive{background:var(--result);width:100%}
+  .tl-fill.cut{background:var(--bad)}
+  .tl-mark{
+    position:absolute;top:0;bottom:0;border-left:1px dashed var(--muted);
+  }
+  .tl-label{position:absolute;right:6px;top:0;font:10.5px var(--mono);color:var(--muted);line-height:20px}
+
+  .note{
+    border-left:3px solid var(--muted);padding:2px 0 2px 14px;
+    color:var(--muted);font-size:13.5px;margin-top:16px;
+  }
+  .note b{color:var(--ink)}
+
+  footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--rule);color:var(--muted);font-size:12.5px}
+  footer p{margin:0 0 7px}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <h1>Code Mode 是什么，以及我们会遇到什么</h1>
+  <p class="lead">平时模型是「一次调一个工具」。code mode 让它「写一段代码，代码里去调工具」。就这一个区别，但会带出几种新情况。</p>
+</header>
+
+<section>
+  <h2><span class="idx">一</span>两种入口，差别只有一层</h2>
+  <p class="sub">左边是平常的调用，右边是 code mode。注意结果最后到达模型手上的东西不一样。</p>
+
+  <div class="two">
+    <div class="way">
+      <h3>直接调用 <span>平常</span></h3>
+      <div class="chain">
+        <div>模型</div>
+        <div class="arrow">↓</div>
+        <div class="hi">bash(...)</div>
+        <div class="arrow">↓</div>
+        <div>真实进程</div>
+        <div class="arrow">↓</div>
+        <div class="out">结果直接回到模型眼前</div>
+      </div>
+    </div>
+    <div class="way">
+      <h3>脚本调用 <span>code mode</span></h3>
+      <div class="chain">
+        <div>模型</div>
+        <div class="arrow">↓</div>
+        <div class="hi">codemode(一段 JS)</div>
+        <div class="arrow">↓</div>
+        <div>沙箱里执行</div>
+        <div class="arrow">↓</div>
+        <div>代码里调 bash(...)</div>
+        <div class="arrow">↓</div>
+        <div class="out">只有 text() 出去的内容回到模型</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="idx">二</span>最关键的一句话：沙箱里的东西，模型看不见</h2>
+  <p class="sub">这不是附加特性，是 code mode 存在的理由。它就是为了让中间过程不占模型的上下文。</p>
+
+  <div class="sandbox">
+    <div class="top">沙箱内部 · 模型完全看不到</div>
+    <div class="in">
+      <p>代码里调了 20 次工具，每次都返回了几百行。这些全部留在沙箱里。</p>
+      <p>模型不会收到这 20 份结果。它不知道调过什么，也不知道返回了什么，除非脚本主动往外送。</p>
+      <pre class="code"><span class="k">const</span> a = <span class="k">await</span> tools.bash({ command: <span class="s">"npm test"</span> });
+<span class="k">const</span> b = <span class="k">await</span> tools.bash({ command: <span class="s">"npm run lint"</span> });
+<span class="c">// a 和 b 里可能是几百行日志，模型一个字都看不到</span>
+
+text(a.exit_code === 0 ? <span class="s">"测试过了"</span> : <span class="s">"测试挂了"</span>);  <span class="c">// 只有这行能出去</span></pre>
+      <div class="exit">出口只有一个。脚本用 <b>text()</b> 送出去的内容，加上 console 输出和脚本的返回值。</div>
+    </div>
+  </div>
+
+  <div class="note">
+    这一点会引出后面很多情况。凡是「模型应该知道但脚本没往外送」的信息，模型就是不知道。
+  </div>
+</section>
+
+<section>
+  <h2><span class="idx">三</span>同一个 bash，在脚本里返回值不一样</h2>
+  <p class="sub">工具没变，只是交给谁变了。交给模型是文字，交给脚本是对象。</p>
+
+  <table>
+    <tr><th></th><th>直接调用</th><th>在脚本里调用</th></tr>
+    <tr>
+      <td>拿到什么</td>
+      <td>一段给人看的文字</td>
+      <td>一个对象，比如 <code>{ output, exit_code }</code></td>
+    </tr>
+    <tr>
+      <td>非零退出</td>
+      <td>算失败，标红</td>
+      <td>不算异常，<code>exit_code</code> 是 1 而已，脚本继续跑</td>
+    </tr>
+    <tr>
+      <td>界面上的实时进度</td>
+      <td>有，一行行刷出来</td>
+      <td>没有，等脚本跑完</td>
+    </tr>
+    <tr>
+      <td>交接时的返回</td>
+      <td>文字提示还带了 <code>task_id</code></td>
+      <td><code>{ status: "running", task_id, log_path }</code></td>
+    </tr>
+  </table>
+</section>
+
+<section>
+  <h2><span class="idx">四</span>六种会遇到的情况</h2>
+  <p class="sub">前两个是正常的，后四个是需要知道原因的。绿色正常，黄色会让人误判，红色真出事。</p>
+
+  <article class="scn ok">
+    <header>
+      <span class="num">01</span>
+      <h3>脚本里跑一个短命令</h3>
+      <span class="verdict ok">正常</span>
+    </header>
+    <pre class="code"><span class="k">const</span> r = <span class="k">await</span> tools.bash({ command: <span class="s">"git status --short"</span> });
+text(r.output);</pre>
+    <p class="why">两秒跑完，结果进沙箱，<code>text()</code> 把内容送出去。模型看到的那几行和直接调用几乎一样。</p>
+    <p class="why"><b>这条没问题，和平常没区别。</b></p>
+  </article>
+
+  <article class="scn ok">
+    <header>
+      <span class="num">02</span>
+      <h3>脚本里跑长命令，脚本乖乖结束</h3>
+      <span class="verdict ok">正常</span>
+    </header>
+    <pre class="code"><span class="k">const</span> r = <span class="k">await</span> tools.bash({ command: <span class="s">"npm test"</span> });
+<span class="k">if</span> (r.status === <span class="s">"running"</span>) text(<span class="s">"后台任务 "</span> + r.task_id);
+<span class="k">else</span> text(<span class="s">"退出码 "</span> + r.exit_code);</pre>
+    <div class="tl">
+      <div class="tl-row"><span>脚本</span><div class="tl-track"><div class="tl-fill alive" style="width:30%"></div><div class="tl-mark" style="left:30%"></div><span class="tl-label">30s 结束</span></div></div>
+      <div class="tl-row"><span>命令</span><div class="tl-track"><div class="tl-fill alive"></div><span class="tl-label">第 30 秒交接，继续跑到 130s</span></div></div>
+      <div class="tl-row"><span>模型</span><div class="tl-track"><div class="tl-fill alive" style="width:30%"></div><span class="tl-label">先收到 task_id，之后收到完成通知</span></div></div>
+    </div>
+    <p class="why">这是设计好的路径。第 30 秒 <code>bash</code> 交接，脚本拿到 <code>task_id</code> 就自己结束了，命令继续跑完。</p>
+    <p class="why">完成时 Pi 发一条通知回原会话。<b>脚本里那行 text 和后来的通知，会是同一件事的两次告知。</b>重复但不丢，这是已知取舍。</p>
+  </article>
+
+  <article class="scn bad">
+    <header>
+      <span class="num">03</span>
+      <h3>脚本超时，命令还没到交接的点</h3>
+      <span class="verdict bad">会误判</span>
+    </header>
+    <pre class="code"><span class="c">// @options: {"timeout_ms": 20000}</span>
+<span class="k">const</span> r = <span class="k">await</span> tools.bash({ command: <span class="s">"npm test"</span> });</pre>
+    <div class="tl">
+      <div class="tl-row"><span>脚本</span><div class="tl-track"><div class="tl-fill cut" style="width:40%"></div><div class="tl-mark" style="left:40%"></div><span class="tl-label">20s 被杀</span></div></div>
+      <div class="tl-row"><span>命令</span><div class="tl-track"><div class="tl-fill cut" style="width:40%"></div><span class="tl-label">同一秒被杀，没活到第 30 秒</span></div></div>
+    </div>
+    <p class="why">脚本设了 20 秒上限，但 <code>bash</code> 要到第 30 秒才交接。第 20 秒脚本被掐，里面还在飞的调用跟着被取消，进程组一起被杀。</p>
+    <p class="why"><b>模型很容易以为「脚本超时了，但命令还在后台跑」。实际上命令已经死了。</b>这是六个里最需要知道的一个。</p>
+  </article>
+
+  <article class="scn bad">
+    <header>
+      <span class="num">04</span>
+      <h3>写了调用，但忘了 await</h3>
+      <span class="verdict bad">立刻死</span>
+    </header>
+    <pre class="code">tools.bash({ command: <span class="s">"npm run build"</span> });   <span class="c">// 少了 await</span>
+text(<span class="s">"构建已在后台启动"</span>);</pre>
+    <p class="why">脚本结束时，没人等的 promise 被直接丢弃。调用被取消，命令当场被杀，往往一行输出都还没产生。</p>
+    <p class="why"><b>那行 text 会让模型以为构建在跑，其实连启动都没完成。</b>这是模型自己写错，但后果是它看不到的。</p>
+  </article>
+
+  <article class="scn warn">
+    <header>
+      <span class="num">05</span>
+      <h3>用一个循环开出一堆后台任务</h3>
+      <span class="verdict warn">会刷屏</span>
+    </header>
+    <pre class="code"><span class="k">const</span> pkgs = [<span class="s">"a"</span>, <span class="s">"b"</span>, <span class="s">"c"</span>];   <span class="c">// 实际可能 20 个</span>
+<span class="k">const</span> out = <span class="k">await</span> Promise.all(
+  pkgs.map(p =&gt; tools.bash({ command: <span class="s">`npm run build -w ${p}`</span> }))
+);</pre>
+    <p class="why">这是 code mode 真正的好处，20 条命令并行，模型只看汇总。但如果每条都超过 30 秒，就会产生 20 个后台任务。</p>
+    <p class="why"><b>之后会有 20 条完成通知陆续回来。</b>我们现在没有任务数量上限，Codex 那边是 64 个并会淘汰最久未用的。</p>
+  </article>
+
+  <article class="scn warn">
+    <header>
+      <span class="num">06</span>
+      <h3>脚本里自己等结果</h3>
+      <span class="verdict warn">会重复</span>
+    </header>
+    <pre class="code"><span class="k">const</span> r = <span class="k">await</span> tools.bash({ command: <span class="s">"npm test"</span> });
+<span class="k">const</span> f = <span class="k">await</span> tools.bash_task({ task_id: r.task_id, wait_seconds: <span class="n">60</span> });
+text(f.output_tail);</pre>
+    <p class="why">脚本等到终态，把尾部打印出来。模型从脚本输出里看到了结果。</p>
+    <p class="why">但 Pi 那边仍然会发完成通知，因为嵌套调用的结果没有作为工具结果出现在模型眼前，Pi 无法判断模型是否真的看到了。<b>结果是同一份内容出现两次。</b></p>
+  </article>
+</section>
+
+<section>
+  <h2><span class="idx">五</span>四家怎么做，我们站在哪</h2>
+  <p class="sub">这一栏之前那份研究档案漏了，只看了 shell 链路，没看 code mode。</p>
+
+  <table>
+    <tr><th>产品</th><th>脚本里能调 shell 吗</th><th>怎么处理脚本自己也跑不完的情况</th></tr>
+    <tr>
+      <td>Codex<br><span class="c" style="font:11.5px var(--mono)">exec / wait</span></td>
+      <td>能，<code>tools.exec_command(...)</code></td>
+      <td>加了一整套「等脚本」的机制。<code>wait(cell_id)</code>，脚本可以挂起再续</td>
+    </tr>
+    <tr>
+      <td>OpenCode<br><span class="c" style="font:11.5px var(--mono)">execute</span></td>
+      <td><b>不能</b>，shell 标了 <code>codemode:false</code></td>
+      <td>不需要。shell 根本进不了脚本，这类问题不存在</td>
+    </tr>
+    <tr>
+      <td>Unreal Agent</td>
+      <td>没有 code mode</td>
+      <td>不适用</td>
+    </tr>
+    <tr>
+      <td><b>Pi（我们）</b><br><span class="c" style="font:11.5px var(--mono)">codemode</span></td>
+      <td>能</td>
+      <td>没有脚本级挂起。脚本必须一口气跑完，跑完就取消还在飞的调用</td>
+    </tr>
+  </table>
+
+  <div class="note">
+    Codex 之所以那么复杂，是因为它支持「脚本挂起、稍后接着跑」。我们没有这个能力，所以那套 <b>cell_id</b> 机制不需要。
+    上面六个情况里，第 3、4 两个的根因就是「脚本不能挂起，只能跑完或被杀」。
+  </div>
+</section>
+
+<section>
+  <h2><span class="idx">六</span>结论</h2>
+  <p><b>代码不用改。</b>归属校验、交付去重、交接之后的取消隔离，这三条我在代码里确认过是对的。</p>
+  <p>要补的是提示词里的一句，大意是「在 code mode 脚本里，脚本结束或被取消时，尚未交接的命令会被一起杀掉。需要它在后台继续，就让命令先跑到交接」。</p>
+  <p>再往下是观察，不是设计。循环开 20 个任务这种，真遇到了再加进程表上限。现在加是猜。</p>
+</section>
+
+<footer>
+  <p>事实来源：本地 <code>~/20-dev/90-third-party-repos/</code> 下的 codex <code>04e365c69</code>、opencode2 <code>843a6c514e</code>、unreal-agent <code>a5f3fd1</code>，以及 Pi 1.6.0 的 <code>dist/extensions/codemode/execute.js</code>。</p>
+  <p>取消传播的结论来自读 <code>execute.js:455-500</code> 和 <code>dist/core/nested-tool-calls.js</code>，没有实际跑 code mode 脚本验证。</p>
+  <p>页面里的命令、task_id、时间都是示例。</p>
+</footer>
+
+</div>
+</body>
+</html>
