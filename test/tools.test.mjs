@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { harness, node, quote, textOf } from "./support.mjs";
+import { harness, node, pi, quote, textOf } from "./support.mjs";
 
 test("cd is per-command and retains the configured shell, prefix and Pi session environment", async () => {
   const h = await harness({ shellPath: "/bin/bash", shellCommandPrefix: "export PREFIX_MARK=kept" });
@@ -48,5 +48,26 @@ test("a short command's large Unicode output keeps Pi's native text limit and lo
     assert(!output.includes("\uFFFD"));
     assert.match(output, /LAST_LINE/);
     assert.equal(readFileSync(result.details.fullOutputPath, "utf8"), "中".repeat(50000) + "\nLAST_LINE\n");
+  } finally { await h.close(); }
+});
+
+test("bash_sync exposes its output limit and throws a catchable command timeout", async () => {
+  const h = await harness({}, [pi.createCodemodeExtension({ mode: "on", models: false })], { tools: ["+codemode"] });
+  try {
+    const limit = 1024 * 1024;
+    const code = `
+      const exact = await tools.bash_sync({ command: ${JSON.stringify(node(`process.stdout.write("x".repeat(${limit}))`))} });
+      const over = await tools.bash_sync({ command: ${JSON.stringify(node(`process.stdout.write("x".repeat(${limit + 1}))`))} });
+      let timeout;
+      try { await tools.bash_sync({ command: "sleep 2", timeout: 0.2 }); }
+      catch (error) { timeout = error.message; }
+      return { exactTruncated: exact.truncated, overTruncated: over.truncated, log: over.full_output_path, timeout };
+    `;
+    const result = await h.call("bash_sync output and timeout", { code }, "codemode");
+    const { exactTruncated, overTruncated, log, timeout } = JSON.parse(textOf(result).split("\n").at(-1));
+    assert.equal(exactTruncated, false);
+    assert.equal(overTruncated, true);
+    assert.equal(readFileSync(log).length, limit + 1);
+    assert.match(timeout, /Command timed out after 0\.2 seconds/);
   } finally { await h.close(); }
 });

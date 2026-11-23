@@ -40,6 +40,8 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     const snapshot = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 0.02 });
     assert.equal(snapshot.details.status, "running");
     assert.equal(snapshot.details.output_tail, "waited:start\n");
+    const elapsed = textOf(snapshot).match(/^Bash task [0-9a-f]{6} is running \((\d+)s elapsed\)$/m);
+    assert.ok(Number(elapsed?.[1]) >= 30, textOf(snapshot));
     assert.match(textOf(snapshot), /^Output so far \(1 line\)$/m);
     assert.doesNotMatch(textOf(snapshot), /end your turn/);
     const oversized = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 301 });
@@ -118,6 +120,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     await rpc.send("prompt", { message: "/bash-stop " + refs.stopped.task_id });
     const stoppedNotice = (await delivered).message;
     assert.equal(stoppedNotice.details.status, "stopped");
+    assert.match(textOf(stoppedNotice), /^Captured output \(1 line\)$/m);
     await rpc.wait(e => e.type === "agent_settled", rpc.events.findLastIndex(e =>
       e.type === "message_end" && e.message.details?.task_id === refs.stopped.task_id));
     assert.match((await rpc.send("get_last_assistant_text")).text, /stopped \(\d+s total\)/);
@@ -129,6 +132,7 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     const timedOut = await rpc.call("bash_task", { task_id: refs.timeout.task_id });
     assert.equal(timedOut.details.status, "timed_out");
     assert.equal(timedOut.details.output_tail, "timeout:start\n");
+    assert.match(textOf(timedOut), /^Captured output \(1 line\)$/m);
     const slowNotifications = completions((await rpc.send("get_messages")).messages);
     for (const name of ["nested", "cancelled", "switched"]) {
       assert.equal(slowNotifications.filter(m => m.details.task_id === refs[name].task_id).length, 1);

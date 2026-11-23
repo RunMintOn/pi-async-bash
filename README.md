@@ -26,9 +26,9 @@ bash_task({ task_id: "650e2e", wait_seconds: 5 })
 bash_task({ task_id: "650e2e", wait_seconds: 0 })
 ```
 
-`task_id` 是 6 位十六进制 ID，也可传给 `/bash-stop`。`bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。最终结果和自动完成通知都显示命令从启动到结束的总耗时。
+`task_id` 是 6 位十六进制 ID，也可传给 `/bash-stop`。`bash_task` 默认最多等 30 秒，允许 0–300 秒。传 `0` 立即查看。命令提前结束时立即返回最终结果。等待到期或取消等待，原命令继续。运行中显示从命令启动到查询时的耗时。最终结果和自动完成通知显示命令总耗时。
 
-每次查看返回状态和日志末尾，最多 40 行、4 KiB。查看结果和完成通知会标明输出范围。有截断时，可以用日志路径和 `read` 的 `offset` 查看更早的内容。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
+每次查看返回状态和日志末尾，最多 40 行、4 KiB。查看结果和完成通知会标明输出范围。命令超时或被停止后，若已捕获的输出全部展示，标题显示 `Captured output`。有截断时，可以用日志路径和 `read` 的 `offset` 查看更早的内容。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
 
 ## 脚本里的执行
 
@@ -43,7 +43,7 @@ const result = await tools.bash_sync({ command: "git status --short" });
 return result.output;
 ```
 
-`bash_sync` 默认供 codemode 脚本调用。它使用原生 Bash 执行，等待命令结果。非零退出也会返回结构化结果。它不创建后台任务，命令执行受 `timeout` 和脚本的 `timeout_ms` 约束。等待期间脚本会占用一个 codemode worker。可以独立运行的长命令用 `bash` 交接。
+`bash_sync` 默认供 codemode 脚本调用。它使用原生 Bash 执行，等待命令结果。非零退出也会返回结构化结果。命令输出超过 1 MiB 时，脚本拿到的结果中 `truncated` 为 `true`，`full_output_path` 指向完整输出。命令超时会抛异常，脚本可以用 `try/catch` 处理。它不创建后台任务，命令执行受 `timeout` 和脚本的 `timeout_ms` 约束。等待期间脚本会占用一个 codemode worker。可以独立运行的长命令用 `bash` 交接。
 
 ## 接续与停止
 

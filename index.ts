@@ -19,14 +19,16 @@ const taskSchema = Type.Object({
   partial_line: Type.Optional(Type.Boolean()),
 });
 
-function formatTask(task: TaskResult) {
-  const status = task.status === "exited" ? `exited with code ${task.exit_code}` :
-    task.status === "timed_out" ? "timed out" : task.status === "running" ? "is running" : task.status;
-  const duration = task.wall_time_seconds === undefined ? "" : ` (${Math.floor(task.wall_time_seconds)}s total)`;
-  const log = `${task.log_error ? "Incomplete log" : "Log"}: ${task.log_path}`;
+function formatTask(task: TaskResult, elapsedSeconds?: number) {
   const running = task.status === "running";
+  const interrupted = task.status === "timed_out" || task.status === "stopped";
+  const status = task.status === "exited" ? `exited with code ${task.exit_code}` :
+    task.status === "timed_out" ? "timed out" : running ? "is running" : task.status;
+  const seconds = elapsedSeconds ?? task.wall_time_seconds;
+  const duration = seconds === undefined ? "" : ` (${Math.floor(seconds)}s ${running ? "elapsed" : "total"})`;
+  const log = `${task.log_error ? "Incomplete log" : "Log"}: ${task.log_path}`;
   const scope = task.log_error ? "Incomplete output" : running ? "Output so far" :
-    task.truncated ? "Output truncated" : "Complete output";
+    task.truncated ? "Output truncated" : interrupted ? "Captured output" : "Complete output";
   const lines = task.start_line === undefined ? "0 lines" :
     task.partial_line ? `showing the end of line ${task.end_line}` :
     task.truncated ? (task.start_line === task.end_line ? `showing line ${task.start_line}` :
@@ -124,7 +126,7 @@ export default function asyncBash(pi: ExtensionAPI) {
     name: "bash_sync",
     label: "bash sync",
     exposure: "codemode",
-    description: "Run a Bash command in the current working directory and wait for its result, including on nonzero exit. Returns output, truncated, exit_code, wall_time_seconds, and full_output_path when the structured output is truncated. The command timeout and the script deadline apply when set. The script occupies a codemode worker while it waits. Use bash directly for long-running commands that can be handed off.",
+    description: "Run a Bash command in the current working directory and wait for its result, including on nonzero exit. Returns output, truncated, exit_code, and wall_time_seconds. If command output exceeds 1 MiB, truncated is true and full_output_path points to the full output. A command timeout throws an error. The command timeout and the script deadline apply when set. The script occupies a codemode worker while it waits. Use bash directly for long-running commands that can be handed off.",
     promptSnippet: undefined,
     promptGuidelines: undefined,
     async execute(id, input, signal, update, ctx) {
@@ -154,9 +156,9 @@ export default function asyncBash(pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     outputSchema: taskSchema,
     async execute(_id, input, signal, _update, ctx) {
-      const data = await manager.wait(ctx.sessionManager.getSessionId(), input.task_id, input.wait_seconds ?? 30, signal);
+      const { elapsedSeconds, ...data } = await manager.wait(ctx.sessionManager.getSessionId(), input.task_id, input.wait_seconds ?? 30, signal);
       return {
-        content: [{ type: "text", text: formatTask(data) }],
+        content: [{ type: "text", text: formatTask(data, elapsedSeconds) }],
         details: data,
         structuredContent: { ...data },
         isError: data.status !== "running" && (data.status !== "exited" || data.exit_code !== 0),

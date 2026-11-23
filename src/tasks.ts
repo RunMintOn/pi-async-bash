@@ -239,7 +239,7 @@ export class TaskManager {
     return task;
   }
 
-  async wait(owner: string, id: string, seconds: number, signal?: AbortSignal): Promise<TaskResult> {
+  async wait(owner: string, id: string, seconds: number, signal?: AbortSignal): Promise<TaskResult & { elapsedSeconds?: number }> {
     const task = this.get(owner, id);
     signal?.throwIfAborted();
     if (!task.final && seconds > 0) {
@@ -255,7 +255,8 @@ export class TaskManager {
       });
     }
     signal?.throwIfAborted();
-    return describe(task);
+    const result = describe(task);
+    return result.status === "running" ? { ...result, elapsedSeconds: (performance.now() - task.started_at) / 1000 } : result;
   }
 
   markDelivered(owner: string, id: string) {

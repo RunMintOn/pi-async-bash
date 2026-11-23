@@ -42,7 +42,7 @@ Pi 文档按此顺序使用这四层，见 `node_modules/@earendil-works/pi-codi
 | `bash` 的规则给出 `tools.bash_sync` | 在模型编写脚本时提供可直接使用的调用名 |
 | `bash_sync` 的描述写 worker 占用 | 脚本等待命令期间会占用一个 worker。可独立运行的长命令可以用 `bash` 交接 |
 | `bash_sync` 的参数沿用原生文本 | 原生「Timeout in seconds (optional, no default timeout)」在同步调用上是准确的。`bash` 那份才需要写「包括交接后」 |
-| 结果标题直接写全文、截断或运行中 | `Complete output (2 lines)` / `Output truncated (showing line 3)` / `Output so far (1 line)` 把「还需不需要读日志」这个判断放在标题里。旧写法 `Showing lines 1–37` 只能靠有无 `(preview truncated)` 反推，模型会为确认再查一次日志。日志故障时 `Incomplete output` 优先于运行中 |
+| 结果标题直接写明输出范围 | `Complete output (2 lines)` / `Output truncated (showing line 3)` / `Output so far (1 line)` 把「还需不需要读日志」这个判断放在标题里。超时或停止且已捕获的输出全部展示时用 `Captured output`。旧写法 `Showing lines 1–37` 只能靠有无 `(preview truncated)` 反推，模型会为确认再查一次日志。日志故障时 `Incomplete output` 优先于运行中 |
 | `bash` 的描述按模式写两组时点 | `print` / `json` 前台等待，`tui` / `rpc` 30 秒交接。不写就会让一次性会话的模型以为「结果会自动回来」，而那个进程回答完就退出了 |
 
 ## 4. 同步阻塞：用工具分工实现，不用参数
