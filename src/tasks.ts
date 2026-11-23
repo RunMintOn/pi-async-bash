@@ -6,6 +6,7 @@ import { finished } from "node:stream/promises";
 
 export const handoffMs = 30_000;
 export const maxWaitSeconds = 300;
+export const completionType = "async-bash-completion";
 const previewBytes = 4 * 1024;
 const previewLines = 40;
 
@@ -26,6 +27,10 @@ export interface TaskResult extends Omit<Handoff, "status"> {
   start_line?: number;
   end_line?: number;
   partial_line?: boolean;
+}
+
+export function taskResult(details: unknown): details is TaskResult {
+  return !!details && typeof details === "object" && "task_id" in details && "output_tail" in details;
 }
 
 interface Task {
@@ -264,8 +269,15 @@ export class TaskManager {
     await task.done;
   }
 
-  running(owner: string) {
-    return [...this.tasks.values()].filter(task => task.owner === owner && task.handed && !task.final);
+  backgroundTasks(owner: string) {
+    const running: number[] = [];
+    const finished: string[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.owner !== owner || !task.handed) continue;
+      if (task.final) finished.push(task.ref.task_id);
+      else running.push(task.started_at);
+    }
+    return { running, finished };
   }
 
   takeCompletions(owner: string, limit = Infinity): TaskResult[] {

@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { createBashToolDefinition, createLocalBashOperations, getAgentDir, type BashToolDetails, type ExtensionAPI, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
-import { getManager, handoffMs, maxWaitSeconds, type Handoff, type TaskResult } from "./src/tasks.ts";
+import { completionType, getManager, handoffMs, maxWaitSeconds, taskResult, type Handoff, type TaskResult } from "./src/tasks.ts";
 import { installTaskStatus } from "./src/status.ts";
 
 const reference = { task_id: Type.String(), log_path: Type.String() };
@@ -41,7 +41,7 @@ function formatTask(task: TaskResult) {
 
 function completion(task: TaskResult) {
   return {
-    customType: "async-bash-completion",
+    customType: completionType,
     content: formatTask(task),
     display: true,
     details: task,
@@ -54,10 +54,6 @@ function handoffResult(data: Handoff) {
     details: data,
     structuredContent: { ...data },
   };
-}
-
-function taskResult(details: unknown): details is TaskResult {
-  return !!details && typeof details === "object" && "task_id" in details && "output_tail" in details;
 }
 
 export default function asyncBash(pi: ExtensionAPI) {
