@@ -26,3 +26,14 @@
 - `handoff: false` 同步阻塞只留提案，不实现。现有阻塞路径是 `timeout` ≤30 秒与 `bash_task` 有界等待；开关容易被泛化，且会丢掉 `task_id`、`/bash-stop`、日志保留和完成通知。重评触发条件写在 `PROMPT_DESIGN.md` 第 4 节。
 - 验证：`npm run check` 与 `npm test` 20/20（约 75 秒），`test/instructions.test.mjs` 捕获 direct 与 codemode-only 的真实请求，`test/cache-prefix.test.mjs` 保持前缀稳定。真实模型对规则的遵循程度仍未验证。
 - 未提交、未发布，包版本仍 0.1.2。Footer 计数已有 `test/footer.test.mjs` 覆盖运行中任务的范围；codemode 内部的返回值与归属整理在 `.scratch/bash-task-handoff/codemode-explainer.html`。
+
+## 2026-11-23 — 三个工具按 exposure 分工，同步阻塞改为 `bash_sync`
+
+- 用户定了命名：`bash`（模型侧，交接）、`bash_sync`（脚本侧，同步）、`bash_task`（模型侧，查看与等待）。`bash_sync` 是 `codemode` exposure，另两个是 `model-only`。上一条里 `handoff: false` 的结论被这次分工取代，「不做布尔开关」的判断保留。
+- `codemode` exposure 在未显式激活时不直接声明。保留直接调用的 `bash`，可沿用 Pi 默认工具集中的同名入口。混合模式使用 `--tools +codemode`，这会保留 `bash_sync` 的脚本调用能力。
+- 被否掉：在 `session_start` 里用 `pi.setActiveTools` 摘掉 `bash`，换取模型侧改名的自由。实测生效且跨轮保持，但 `--tools` 同时是注册白名单，点名 `bash` 时替换工具会被整个摘掉，模型一个 shell 都不剩，实测声明只剩 `read`、`edit`、`write`。
+- 实测：脚本里访问 `tools.bash` 会抛错。三个 Bash 工具中，`ALL_TOOLS` 只列出 `bash_sync`。
+- codemode only 模式只隐藏 `direct` exposure 的工具，`model-only` 的 `bash` 与 `bash_task` 仍然直接声明给模型。已在 README 记为已知边界，`only` 未专门适配。
+- 提示词层：`bash_sync` 没有 snippet 与 guidelines，只有 description 和参数进 codemode 描述。`bash` 加了一条把脚本场景导向 `bash_sync` 的规则。
+- 上一版留档：提交 `4c2555b` 与 `.scratch/bash-task-handoff/prompt-c-reviewed.md`。本轮文本在 `prompt-d-split.md`。
+- 可见性规则与验证手法汇总在 `PI_TOOL_EXPOSURE.md`，修改 exposure 或可见性断言前先读。

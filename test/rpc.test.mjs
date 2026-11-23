@@ -40,10 +40,13 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     assert.doesNotMatch(textOf(snapshot), /end your turn/);
     const oversized = await rpc.call("bash_task", { task_id: refs.waited.task_id, wait_seconds: 301 });
     assert.equal(oversized.isError, true);
-    const nested = await rpc.call("codemode", {
-      code: `return await tools.bash_task({ task_id: ${JSON.stringify(refs.waited.task_id)}, wait_seconds: 0 });`,
+    // Only the synchronous Bash tool is available to the script.
+    const exposure = await rpc.call("codemode", {
+      code: "return ALL_TOOLS.filter(tool => tool.name.startsWith('bash')).map(tool => tool.name);",
     });
-    assert.match(textOf(nested), /"output_tail":"waited:start\\n"/);
+    assert.match(textOf(exposure), /\["bash_sync"\]/);
+    const missing = await rpc.call("codemode", { code: "return tools.bash;" });
+    assert.match(textOf(missing), /tools\.bash does not exist/);
 
     const waitStart = () => rpc.wait(e => e.type === "tool_execution_start" && e.toolName === "bash_task", rpc.events.length);
     let started = waitStart();
@@ -71,15 +74,17 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
       e.type === "message_end" && e.message.details?.task_id === refs.cancelled.task_id));
     assert.match((await rpc.send("get_last_assistant_text")).text, /cancelled:fail/);
 
-    const nestedStart = waitStart();
     delivered = rpc.wait(e => (e.type === "message_end" && e.message.details?.task_id === refs.nested.task_id) ||
       (e.type === "entry_appended" && e.entry.details?.task_id === refs.nested.task_id), rpc.events.length);
-    const nestedWait = rpc.call("codemode", {
-      code: `await tools.bash_task({ task_id: ${JSON.stringify(refs.nested.task_id)} }); return "Handled in script";`,
+    const scriptStart = rpc.wait(e => e.type === "tool_execution_start" && e.toolName === "codemode", rpc.events.length);
+    const nestedRun = rpc.call("codemode", {
+      code: 'return await tools.bash_sync({ command: "printf SYNC_OK; exit 3" });',
     });
-    await nestedStart;
+    await scriptStart;
     writeFileSync(refs.nested.gate, "");
-    assert.match(textOf(await nestedWait), /Handled in script/);
+    const synced = textOf(await nestedRun);
+    assert.match(synced, /"output":"SYNC_OK"/);
+    assert.match(synced, /"exit_code":3/);
     const nestedDelivery = await delivered;
     assert.equal((nestedDelivery.entry ?? nestedDelivery.message).details.exit_code, 7);
     assert.match((await rpc.send("get_last_assistant_text")).text, /nested:fail/);
@@ -113,11 +118,6 @@ test("Pi RPC: one handoff per command, wait and cancellation, original-session w
     }
     assert(!slowNotifications.some(m => m.details.task_id === refs.waited.task_id));
 
-    const native = await rpc.call("codemode", {
-      code: 'return await tools.bash({ command: "printf NESTED_FAILURE; exit 7" });',
-    });
-    assert.match(textOf(native), /"output":"NESTED_FAILURE"/);
-    assert.match(textOf(native), /"exit_code":7/);
     const quitPid = readFileSync(refs.quit.pid, "utf8").trim();
     await rpc.close();
     assert(!existsSync(refs.quit.log_path));

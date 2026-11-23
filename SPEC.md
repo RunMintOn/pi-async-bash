@@ -4,13 +4,16 @@
 
 | 接口 | 约定 |
 |---|---|
-| `bash({ command, timeout? })` | 使用原生 Bash 执行。命令先结束就返回原生结果。30 秒仍在运行就返回 `status: "running"`、`task_id`、`log_path`。`timeout` 约束命令总执行时间。 |
-| `bash_task({ task_id, wait_seconds? })` | 允许 0–300 秒，默认等 30 秒，零秒立即查看。等待期间命令退出就提前返回。等待到期或取消后，进程照常运行。 |
-| `/bash-stop <task_id>` | 停止原会话拥有的已交接任务。 |
+| `bash({ command, timeout? })` | `model-only`。使用原生 Bash 执行。命令先结束就返回原生结果。30 秒仍在运行就返回 `status: "running"`、`task_id`、`log_path`。`timeout` 约束命令总执行时间。 |
+| `tools.bash_sync({ command, timeout? })` | `codemode`。等待原生 Bash 的执行结果，含非零退出码。无后台任务、交接日志或完成通知。输出截断仍保留原生 Bash 的 `full_output_path`。 |
+| `bash_task({ task_id, wait_seconds? })` | `model-only`。允许 0–300 秒，默认等 30 秒，零秒立即查看。等待期间命令退出就提前返回。等待到期或取消后，进程照常运行。 |
+| `/bash-stop <task_id>` | 停止原会话拥有的已交接任务。同步调用不在管理范围内。 |
+
+`model-only` 的工具由模型直接调用。`codemode` 的工具默认供脚本调用，显式激活后也会声明给模型。
 
 `bash_task` 和完成通知复用同一份结果。状态为 `running`、`exited`、`timed_out`、`stopped` 或 `failed`。正常退出返回实际 `exit_code`。`output_tail` 最多 40 行、4 KiB。非空预览带 `start_line` 和 `end_line`，从 1 起算。`truncated` 表示省略了日志前缀。最后一行超限时返回完整 UTF-8 字符组成的后缀，并用 `partial_line` 标记。日志写入失败时终止命令，返回故障并标明日志不完整。
 
-终态在日志写入流结束后发布。模型直接调用 `bash_task` 并拿到终态时省去自动通知。codemode 内部的调用把结果交给脚本，Pi 仍向原会话自动通知。其余完成结果追加到原会话末尾。空闲时自动开一轮，忙碌时在下一次模型调用送达。原会话未打开时保留待送结果。已完成的任务可主动重查。
+终态在日志写入流结束后发布。模型直接调用 `bash_task` 并拿到终态时省去自动通知。其余完成结果追加到原会话末尾。空闲时自动开一轮，忙碌时在下一次模型调用送达。原会话未打开时保留待送结果。已完成的任务可主动重查。
 
 任务记录保留终止原因和退出码等元数据。日志预览按需生成。原会话的任务和完整日志在当前 Pi 进程内保留。Fork 继承历史消息，任务的查询、停止和通知仍归原会话。正常退出时停止受管进程并清理扩展的临时日志。当前工具面向自行结束的命令。
 

@@ -1,5 +1,12 @@
 # 本地实施记录
 
+## T12 — 三个工具按 exposure 分工
+
+- 已实现。`bash` 与 `bash_task` 为 `model-only`，新增 `bash_sync` 为 `codemode`。规格与提示词见 [SPEC.md](SPEC.md)、[D 稿](.scratch/bash-task-handoff/prompt-d-split.md)、[PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 4 节。
+- `bash_sync` 直接用原生 `createBashToolDefinition`，沿用原生输出与截断处理。后台任务归 `bash` 的交接流程管理。
+- `test/instructions.test.mjs` 捕获未启用 codemode、`on` 和 `only` 三种模式的工具声明。`test/rpc.test.mjs` 以 `--tools +codemode` 验证脚本可调用 `bash_sync` 并获得非零退出码。
+- 未提交、未发布，包版本仍 0.1.2。
+
 ## T11 — 长命令交接、有限等待与原会话自动接续
 
 - 已实现。见[本地规格](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md)。以 Pi 1.6.0 验收，20 个测试通过，包括真实 RPC 用户旅程和 OpenAI 适配器请求前缀回归。

@@ -28,13 +28,33 @@ bash_task({ task_id: "...", wait_seconds: 0 })
 
 每次查看返回状态和日志末尾，最多 40 行、4 KiB。`start_line` 和 `end_line` 对应完整日志的 1 起始行号。用 `read` 的 `offset` 可以定位更早的内容。如果最后一行单独超过字节上限，预览会标明只显示了这一行的末尾。
 
+## 脚本里的执行
+
+用混合模式同时启用模型侧的 `bash`、`bash_task` 和脚本侧的 `bash_sync`。
+
+```bash
+pi -e ./index.ts --tools +codemode
+```
+
+```typescript
+const result = await tools.bash_sync({ command: "git status --short" });
+return result.output;
+```
+
+`bash_sync` 默认供 codemode 脚本调用。它使用原生 Bash 执行，等待命令结果。非零退出也会返回结构化结果。它不创建后台任务，命令执行受 `timeout` 和脚本的 `timeout_ms` 约束。等待期间脚本会占用一个 codemode worker。可以独立运行的长命令用 `bash` 交接。
+
 ## 接续与停止
 
 - 任务完成时，Pi 唤醒空闲的原会话。原会话正在工作时，结果会随下一次模型调用送达。切走期间完成的结果，切回原会话时送达。
-- 模型直接调用 `bash_task` 拿到最终结果时，Pi 省去自动通知。通过 codemode 在脚本内读取时，Pi 仍会通知原会话。以后可以用同一个 ID 复查。
+- 模型直接调用 `bash_task` 拿到最终结果时，Pi 省去自动通知。以后可以用同一个 ID 复查。
 - 用 `/bash-stop <task_id>` 停止已交接的命令。取消还未交接的 `bash` 则会停止该次命令。
 - 完整日志在当前 Pi 进程内保留。完成预览按需从日志生成。正常退出时，扩展停止受管任务并清理交接日志。TUI 底部状态栏显示当前会话的后台任务。
 - Fork 会继承历史中的工具消息。任务查询、停止和完成通知仍归启动命令的会话。
+
+## 已知边界
+
+- 在 Pi 1.6.0 中，`--tools` 使用普通名称列表时会过滤扩展工具的注册。显式列入 `bash_sync` 会同时把它声明给模型。使用 `--tools +codemode` 可保留默认分工。
+- 本扩展按混合模式设计，即 codemode 的 `on`。`only` 模式下 `bash` 和 `bash_task` 仍然直接声明给模型，因为 `only` 只隐藏 `direct` exposure 的工具。
 
 ## 开发
 
@@ -46,7 +66,8 @@ npm test
 测试使用 Pi 1.6.0、真实 Shell 和离线模型。RPC 测试保留事件记录，缓存回归保留 OpenAI 适配器生成的请求。测试输出会打印临时目录。
 
 - 改工具契约时读 [SPEC.md](SPEC.md)。改完成投递、提示词或日志时，先读 [T11 的维护要点](.scratch/bash-task-handoff/issues/01-bash-task-handoff.md#维护要点)。
-- 改工具描述、`promptSnippet` 或 `promptGuidelines` 时读 [模型可见提示词的设计规则](PROMPT_DESIGN.md)，其中记录了分层、已固定措辞的理由和被否掉的同步阻塞方案。
+- 改工具描述、`promptSnippet` 或 `promptGuidelines` 时读 [模型可见提示词的设计规则](PROMPT_DESIGN.md)，其中记录了分层和已固定措辞的理由。
+- 改 `exposure`、`--tools` 或工具可见性断言时读 [Pi 工具可见性](PI_TOOL_EXPOSURE.md)，其中有三种模式的实测声明形状和验证手法。
 - 调整交接或等待时长时，读[阈值样本与统计口径](THRESHOLD_ANALYSIS.md)。比较其他 Agent 的执行与提示设计时，读[异步 Shell 调研索引](.scratch/async-bash-research/README.md)。
 - [TICKETS.md](TICKETS.md) 记录历史实现与验收。
 
