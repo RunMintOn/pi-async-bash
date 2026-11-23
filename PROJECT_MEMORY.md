@@ -37,3 +37,11 @@
 - 提示词层：`bash_sync` 没有 snippet 与 guidelines，只有 description 和参数进 codemode 描述。`bash` 加了一条把脚本场景导向 `bash_sync` 的规则。
 - 上一版留档：提交 `4c2555b` 与 `.scratch/bash-task-handoff/prompt-c-reviewed.md`。本轮文本在 `prompt-d-split.md`。
 - 可见性规则与验证手法汇总在 `PI_TOOL_EXPOSURE.md`，修改 exposure 或可见性断言前先读。
+
+## 2026-11-24 — 任务 ID、总耗时与结果正文
+
+- `task_id` 从完整 UUID 改为 6 位十六进制（`randomBytes(3).toString("hex")`），生成时对 `this.tasks` 撞号重抽。日志文件名、交接结果、`bash_task`、`/bash-stop` 和 TUI 直接用这个值，查找仍是完整匹配加 owner 校验。否掉的方案是保留 UUID 并让工具接受前缀匹配：多一层匹配逻辑，长 ID 在屏幕上也没有用处。
+- 终态新增 `wall_time_seconds`，在 `run` 的 `finally` 里算一次写进 `task.final`，随 `describe()` 同时出现在完成通知和 `bash_task` 结果里。口径是命令启动（`execution.start` 重置 `started_at`）到执行结束，不含日志流收尾和等待投递。`started_at` 与 `src/status.ts` 的 footer 计时改用 `performance.now()`；`Date.now()` 在这两处会被系统时间调整带偏，footer 还需要单调递增。
+- 正文定稿：`Bash task <id> <status> (<n>s total)`、`Log: <path>`、空行、`<scope> (<lines>)`、空行、输出。`formatTask` 用 `Math.floor` 取整秒，`running` 写 `is running`。否掉：`·` 分隔（用户判断不好看）、逐行行号（`Complete output (36 lines)` 已足够定位，保留命令原文更便于复制）。
+- 分层事实，本轮反复确认过：`pi.sendMessage()` 的 `content` 经 `convertToLlm` 进模型上下文，`details` 不进，只给 TUI renderer。`25` 不注册渲染器，默认 `CustomMessageComponent` 显示 `[async-bash-completion]` 标签；`22-pi-compact-tool` 注册 renderer 后接管显示。同一个正文两边都能看到，标题和折叠状态只在 TUI。
+- 验收：`npm run check` 与 `test/rpc.test.mjs` 通过。用例断言 6 位 ID、日志路径以 ID 命名、`wall_time_seconds >= 30`，以及通知与 `bash_task` 的耗时、正文完全一致。提交 `5e11353`。

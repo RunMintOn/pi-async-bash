@@ -1,5 +1,14 @@
 # 本地实施记录
 
+## T14 — 任务 ID、总耗时与结果正文
+
+- 已实现并提交 `5e11353`（分支 `experiment/bash-task-handoff`）。契约见 [SPEC.md](SPEC.md)，决策原因与分层事实见 [PROJECT_MEMORY.md](PROJECT_MEMORY.md) 的 2026-11-24 一节。
+- `task_id` 从完整 UUID 改为 6 位十六进制，撞号重抽。`bash_task` 与 `/bash-stop` 直接接收屏幕上显示的值。
+- 终态新增 `wall_time_seconds`。完成通知与 `bash_task` 共用 `describe()`，正文按整秒显示，两路结果一致。
+- 正文重排：首行状态与耗时、日志路径、空行、输出标题、空行、输出。行号与截断范围不变。
+- 配套 TUI 改动在 `22-pi-compact-tool`，见其 `checks/bash-notification-validation.md`。
+- 验收：`npm run check` 通过，`test/rpc.test.mjs` 通过。未跑完整 `npm test`：同一轮修改中只重跑了受影响的 RPC、results、footer 用例。
+
 ## T13 — 一次性模式前台执行与预览标题
 
 - 已实现。`bash` 在 `ctx.mode` 为 `print` / `json` 时直接用原生 `createBashToolDefinition` 跑到结束，不建任务、不交接。`tui` 与 `rpc` 维持 30 秒交接。契约见 [SPEC.md](SPEC.md) 第一张表，提示词分层见 [PROMPT_DESIGN.md](PROMPT_DESIGN.md) 第 1 节。
